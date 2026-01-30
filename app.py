@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 import sqlite3
 import hashlib
+import yfinance as yf
 import requests
 from datetime import datetime
 
@@ -9,9 +10,20 @@ app.secret_key = 'monpecule_secret_key_2026_change_this_in_production'
 
 # --- CONFIGURATION ---
 DB_PATH = 'monpecule.db'
-FMP_API_KEY = "qvnX5eR9PdCZ5KhoqmEO2OrjO3q0ThcF"
 
 # --- UTILS ---
+def safe_float(value, default=0.0):
+    try:
+        return float(value) if value else default
+    except (ValueError, TypeError):
+        return default
+
+def safe_int(value, default=0):
+    try:
+        return int(value) if value else default
+    except (ValueError, TypeError):
+        return default
+
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -37,53 +49,60 @@ def init_db():
 
 init_db()
 
-# --- API MARKETSTACK ---
+# --- API YAHOO FINANCE (yfinance) ---
 def fetch_price_from_api(identifier):
     """
-    Recherche le prix et le nom d'une action via FMP API.
-    Supporte: symboles boursiers (AAPL), noms de sociétés (Apple), codes ISIN, EPA:XXX
+    Recherche le prix et le nom d'une action via yfinance.
+    Supporte: symboles boursiers (AAPL, BNP.PA), noms de sociétés, codes ISIN.
     """
     if not identifier: 
         return None, None
     
+    identifier = identifier.strip()
+    
+    # 1. On tente une recherche directe d'abord
     try:
-        # Essai 1: Recherche directe par symbole (AAPL, TSLA, etc.)
-        symbol = identifier.upper()
-        res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
-                          params={'symbol': symbol, 'apikey': FMP_API_KEY})
-        
+        ticker = yf.Ticker(identifier)
+        # Utiliser fast_info pour le prix (plus rapide et fiable)
+        price = ticker.fast_info.last_price
+        # On essaie de récupérer le nom via info (optionnel car lent)
+        name = identifier
+        try:
+            name = ticker.info.get('longName') or ticker.info.get('shortName') or identifier
+        except:
+            pass
+            
+        if price and not isinstance(price, (type(None), str)):
+            return (round(float(price), 2), name)
+    except:
+        pass
+
+    # 2. Fallback: Recherche Yahoo Finance pour trouver le Ticker (ISIN ou Nom)
+    try:
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={identifier}&quotesCount=1"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            if data and len(data) > 0:
-                price = data[0].get('price')
-                name = data[0].get('name', symbol)
-                return (round(price, 2) if price else None, name)
-        
-        # Essai 2: Recherche par nom de société ou ISIN
-        search_res = requests.get(f"https://financialmodelingprep.com/stable/search-symbol", 
-                                params={'query': identifier, 'apikey': FMP_API_KEY})
-        
-        if search_res.status_code == 200:
-            search_data = search_res.json()
-            if search_data and len(search_data) > 0:
-                # Prendre le premier résultat
-                first_result = search_data[0]
-                symbol = first_result.get('symbol')
-                name = first_result.get('name', symbol)
+            if data.get('quotes') and len(data['quotes']) > 0:
+                symbol = data['quotes'][0]['symbol']
+                name = data['quotes'][0].get('longname') or data['quotes'][0].get('shortname') or symbol
                 
-                # Récupérer le prix pour ce symbole
-                price_res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
-                                       params={'symbol': symbol, 'apikey': FMP_API_KEY})
-                if price_res.status_code == 200:
-                    price_data = price_res.json()
-                    if price_data and len(price_data) > 0:
-                        price = price_data[0].get('price')
-                        return (round(price, 2) if price else None, name)
-        
-        return None, None
+                # On récupère le prix pour ce symbole trouvé
+                ticker = yf.Ticker(symbol)
+                price = ticker.fast_info.last_price
+                if not price:
+                    # Dernier recours: historique
+                    hist = ticker.history(period='1d')
+                    if not hist.empty:
+                        price = hist['Close'].iloc[-1]
+                
+                if price and not isinstance(price, (type(None), str)):
+                    return (round(float(price), 2), name)
     except Exception as e:
-        print(f"Erreur API FMP: {e}")
-        return None, None
+        print(f"Erreur recherche yfinance: {e}")
+        
+    return None, None
 
 # --- ROUTES ---
 @app.route('/')
@@ -173,10 +192,10 @@ def add_actif():
     compte_id = request.form.get('compte_id')
     nom = request.form.get('nom')
     ticker = request.form.get('ticker')
-    pa = float(request.form.get('prix_achat', 0))
-    q = int(request.form.get('quantite', 1))
-    fr = float(request.form.get('frais', 0))
-    pnow = float(request.form.get('prix_actuel', 0))
+    pa = safe_float(request.form.get('prix_achat'))
+    q = safe_int(request.form.get('quantite'), 1)
+    fr = safe_float(request.form.get('frais'))
+    pnow = safe_float(request.form.get('prix_actuel'))
     
     conn = get_connection()
     conn.execute('INSERT INTO actifs (compte_id, nom_actif, ticker_isin, prix_achat, quantite, frais, prix_actuel, prix_veille) VALUES (?,?,?,?,?,?,?,?)',
@@ -189,10 +208,10 @@ def add_actif():
 def update_actif(actif_id):
     if 'user_id' not in session: return redirect(url_for('index'))
     nom = request.form.get('nom')
-    pa = float(request.form.get('prix_achat'))
-    q = int(request.form.get('quantite'))
-    fr = float(request.form.get('frais'))
-    pnow = float(request.form.get('prix_actuel'))
+    pa = safe_float(request.form.get('prix_achat'))
+    q = safe_int(request.form.get('quantite'))
+    fr = safe_float(request.form.get('frais'))
+    pnow = safe_float(request.form.get('prix_actuel'))
     
     conn = get_connection()
     conn.execute('UPDATE actifs SET nom_actif=?, prix_achat=?, quantite=?, frais=?, prix_actuel=? WHERE id=?',
@@ -240,16 +259,18 @@ def update_prices():
         try:
             for ticker_row in tickers:
                 symbol = ticker_row['ticker']
-                res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
-                                  params={'symbol': symbol, 'apikey': FMP_API_KEY})
-                if res.status_code == 200:
-                    data = res.json()
-                    if data and len(data) > 0:
-                        price = data[0].get('price')
-                        if price:
-                            conn.execute('UPDATE actifs SET prix_actuel = ? WHERE UPPER(ticker_isin) = ?', 
-                                       (float(price), symbol.upper()))
-                            updated += 1
+                ticker = yf.Ticker(symbol)
+                # Utilisation de fast_info pour la mise à jour massive
+                price = ticker.fast_info.last_price
+                if not price:
+                    hist = ticker.history(period='1d')
+                    if not hist.empty:
+                        price = hist['Close'].iloc[-1]
+                
+                if price and not isinstance(price, (type(None), str)):
+                    conn.execute('UPDATE actifs SET prix_actuel = ? WHERE UPPER(ticker_isin) = ?', 
+                               (float(price), symbol.upper()))
+                    updated += 1
             conn.commit()
             conn.close()
             return jsonify({'success': True, 'message': f'{updated} cours mis à jour'})
@@ -259,7 +280,7 @@ def update_prices():
     return jsonify({'success': False})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5010)
 
 # WSGI entry point for cPanel
 application = app
