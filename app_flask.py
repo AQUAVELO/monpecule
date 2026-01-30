@@ -9,7 +9,7 @@ app.secret_key = 'monpecule_secret_key_2026_change_this_in_production'
 
 # --- CONFIGURATION ---
 DB_PATH = 'monpecule.db'
-MARKETSTACK_API_KEY = "d3853c0620d9faf295452b6b541a2980"
+FMP_API_KEY = "qvnX5eR9PdCZ5KhoqmEO2OrjO3q0ThcF"
 
 # --- UTILS ---
 def hash_password(password):
@@ -37,78 +37,54 @@ def init_db():
 
 init_db()
 
-# --- API MARKETSTACK ---
+# --- API FINANCIAL MODELING PREP ---
 def fetch_price_from_api(identifier):
     """
-    Recherche une action par nom, symbole (AAPL, OR.PA) ou ISIN (FR0000120321)
+    Recherche une action par nom, symbole (AAPL, TSLA, OR.PA) ou ISIN
+    Utilise Financial Modeling Prep API (250 requêtes/jour gratuit)
     """
     if not identifier: return None, None
     
     identifier = identifier.strip()
     
     try:
-        # Détection ISIN (12 caractères alphanumériques commençant par 2 lettres)
-        if len(identifier) == 12 and identifier[:2].isalpha() and identifier[2:].isalnum():
-            # C'est probablement un ISIN, on essaie de chercher par ISIN
-            search_res = requests.get(f"http://api.marketstack.com/v1/tickers", 
-                                    params={'access_key': MARKETSTACK_API_KEY, 'search': identifier})
-            if search_res.status_code == 200:
-                data = search_res.json()
-                if 'data' in data and len(data['data']) > 0:
-                    symbol = data['data'][0]['symbol']
-                    name = data['data'][0]['name']
-                    # Récupérer le prix
-                    res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
-                                      params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
-                    if res.status_code == 200:
-                        price_data = res.json()
-                        if 'data' in price_data and len(price_data['data']) > 0:
-                            price = price_data['data'][0].get('close')
-                            return (round(price, 2) if price else None, name)
-        
-        # Essai 1: Recherche directe par symbole (AAPL, TSLA, OR.PA, etc.)
+        # Essai 1: Recherche directe par symbole (AAPL, TSLA, etc.)
         symbol = identifier.upper()
-        res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
-                          params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
+        res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
+                          params={'symbol': symbol, 'apikey': FMP_API_KEY})
         
         if res.status_code == 200:
             data = res.json()
-            if 'data' in data and len(data['data']) > 0:
-                price = data['data'][0].get('close')
-                # Récupérer le nom complet
-                ticker_res = requests.get(f"http://api.marketstack.com/v1/tickers/{symbol}", 
-                                        params={'access_key': MARKETSTACK_API_KEY})
-                name = symbol
-                if ticker_res.status_code == 200:
-                    ticker_data = ticker_res.json()
-                    name = ticker_data.get('name', symbol)
+            if data and len(data) > 0:
+                price = data[0].get('price')
+                name = data[0].get('name', symbol)
                 return (round(price, 2) if price else None, name)
         
-        # Essai 2: Recherche par nom de société ou texte
-        search_res = requests.get(f"http://api.marketstack.com/v1/tickers", 
-                                params={'access_key': MARKETSTACK_API_KEY, 'search': identifier, 'limit': 5})
+        # Essai 2: Recherche par nom de société ou ISIN
+        search_res = requests.get(f"https://financialmodelingprep.com/stable/search-symbol", 
+                                params={'query': identifier, 'apikey': FMP_API_KEY})
         
         if search_res.status_code == 200:
             search_data = search_res.json()
-            if 'data' in search_data and len(search_data['data']) > 0:
+            if search_data and len(search_data) > 0:
                 # Prendre le premier résultat
-                first_result = search_data['data'][0]
-                symbol = first_result['symbol']
-                name = first_result['name']
+                first_result = search_data[0]
+                symbol = first_result.get('symbol')
+                name = first_result.get('name', symbol)
                 
                 # Récupérer le prix pour ce symbole
-                res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
-                                  params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
-                if res.status_code == 200:
-                    price_data = res.json()
-                    if 'data' in price_data and len(price_data['data']) > 0:
-                        price = price_data['data'][0].get('close')
+                price_res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
+                                       params={'symbol': symbol, 'apikey': FMP_API_KEY})
+                if price_res.status_code == 200:
+                    price_data = price_res.json()
+                    if price_data and len(price_data) > 0:
+                        price = price_data[0].get('price')
                         return (round(price, 2) if price else None, name)
         
         return None, None
         
     except Exception as e:
-        print(f"Erreur API: {e}")
+        print(f"Erreur API FMP: {e}")
         return None, None
 
 # --- ROUTES ---
@@ -258,20 +234,26 @@ def update_prices():
     tickers = conn.execute('''SELECT DISTINCT UPPER(ticker_isin) as ticker FROM actifs a 
                              JOIN comptes c ON a.compte_id=c.id 
                              WHERE c.user_id=? AND ticker_isin != ""''', (session['user_id'],)).fetchall()
+    updated = 0
     if tickers:
-        symbols = ",".join([t['ticker'] for t in tickers])
         try:
-            res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
-                              params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbols})
-            if res.status_code == 200:
-                data = res.json()
-                for item in data.get('data', []):
-                    conn.execute('UPDATE actifs SET prix_actuel = ? WHERE UPPER(ticker_isin) = ?', 
-                               (item['close'], item['symbol'].upper()))
-                conn.commit()
-                conn.close()
-                return jsonify({'success': True, 'message': 'Cours mis à jour'})
-        except: pass
+            for ticker_row in tickers:
+                symbol = ticker_row['ticker']
+                res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
+                                  params={'symbol': symbol, 'apikey': FMP_API_KEY})
+                if res.status_code == 200:
+                    data = res.json()
+                    if data and len(data) > 0:
+                        price = data[0].get('price')
+                        if price:
+                            conn.execute('UPDATE actifs SET prix_actuel = ? WHERE UPPER(ticker_isin) = ?', 
+                                       (price, symbol.upper()))
+                            updated += 1
+            conn.commit()
+            conn.close()
+            return jsonify({'success': True, 'message': f'{updated} cours mis à jour'})
+        except Exception as e:
+            print(f"Erreur update: {e}")
     conn.close()
     return jsonify({'success': False})
 
