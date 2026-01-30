@@ -39,32 +39,74 @@ init_db()
 
 # --- API MARKETSTACK ---
 def fetch_price_from_api(identifier):
+    """
+    Recherche une action par nom, symbole (AAPL, OR.PA) ou ISIN (FR0000120321)
+    """
     if not identifier: return None, None
+    
+    identifier = identifier.strip()
+    
     try:
-        # 1. On essaie de chercher le ticker si ce n'est pas un symbole direct
-        search_res = requests.get(f"http://api.marketstack.com/v1/tickers", 
-                                params={'access_key': MARKETSTACK_API_KEY, 'search': identifier})
+        # Détection ISIN (12 caractères alphanumériques commençant par 2 lettres)
+        if len(identifier) == 12 and identifier[:2].isalpha() and identifier[2:].isalnum():
+            # C'est probablement un ISIN, on essaie de chercher par ISIN
+            search_res = requests.get(f"http://api.marketstack.com/v1/tickers", 
+                                    params={'access_key': MARKETSTACK_API_KEY, 'search': identifier})
+            if search_res.status_code == 200:
+                data = search_res.json()
+                if 'data' in data and len(data['data']) > 0:
+                    symbol = data['data'][0]['symbol']
+                    name = data['data'][0]['name']
+                    # Récupérer le prix
+                    res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
+                                      params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
+                    if res.status_code == 200:
+                        price_data = res.json()
+                        if 'data' in price_data and len(price_data['data']) > 0:
+                            price = price_data['data'][0].get('close')
+                            return (round(price, 2) if price else None, name)
         
+        # Essai 1: Recherche directe par symbole (AAPL, TSLA, OR.PA, etc.)
         symbol = identifier.upper()
-        name = identifier
-        
-        if search_res.status_code == 200:
-            data = search_res.json()
-            if 'data' in data and len(data['data']) > 0:
-                symbol = data['data'][0]['symbol']
-                name = data['data'][0]['name']
-
-        # 2. On récupère le prix pour ce symbole
         res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
                           params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
         
-        price = None
         if res.status_code == 200:
             data = res.json()
             if 'data' in data and len(data['data']) > 0:
                 price = data['data'][0].get('close')
+                # Récupérer le nom complet
+                ticker_res = requests.get(f"http://api.marketstack.com/v1/tickers/{symbol}", 
+                                        params={'access_key': MARKETSTACK_API_KEY})
+                name = symbol
+                if ticker_res.status_code == 200:
+                    ticker_data = ticker_res.json()
+                    name = ticker_data.get('name', symbol)
+                return (round(price, 2) if price else None, name)
         
-        return (round(price, 2) if price else None, name)
+        # Essai 2: Recherche par nom de société ou texte
+        search_res = requests.get(f"http://api.marketstack.com/v1/tickers", 
+                                params={'access_key': MARKETSTACK_API_KEY, 'search': identifier, 'limit': 5})
+        
+        if search_res.status_code == 200:
+            search_data = search_res.json()
+            if 'data' in search_data and len(search_data['data']) > 0:
+                # Prendre le premier résultat
+                first_result = search_data['data'][0]
+                symbol = first_result['symbol']
+                name = first_result['name']
+                
+                # Récupérer le prix pour ce symbole
+                res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
+                                  params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
+                if res.status_code == 200:
+                    price_data = res.json()
+                    if 'data' in price_data and len(price_data['data']) > 0:
+                        price = price_data['data'][0].get('close')
+                        return (round(price, 2) if price else None, name)
+        
+        return None, None
+        
     except Exception as e:
         print(f"Erreur API: {e}")
         return None, None

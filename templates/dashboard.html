@@ -76,7 +76,7 @@
             
             <form method="POST" action="{{ url_for('add_actif') }}" style="margin-top: 20px; padding-top: 15px; border-top: 2px solid #eee;">
                 <input type="hidden" name="compte_id" value="{{ compte.id }}">
-                <input type="text" name="ticker" placeholder="Symbole, Nom ou ISIN" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <input type="text" name="ticker" placeholder="Tapez le nom (Tesla), symbole (TSLA) ou ISIN puis Entrée" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;" onkeypress="if(event.key === 'Enter') { event.preventDefault(); searchTicker(this.form); }">
                 <button type="button" class="btn" style="width: 100%; margin-bottom: 10px; background: #17a2b8;" onclick="searchTicker(this.form)">🔍 Rechercher</button>
                 <input type="text" name="nom" placeholder="Nom" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
@@ -145,19 +145,34 @@
         }
         
         function searchTicker(form) {
-            const ticker = form.ticker.value;
+            const ticker = form.ticker.value.trim();
             if (!ticker) return;
             
-            fetch('/api/search_ticker/' + ticker)
+            // Affichage d'un indicateur de chargement
+            const originalBtn = form.querySelector('button[type="button"]');
+            const originalText = originalBtn.innerHTML;
+            originalBtn.innerHTML = '⏳ Recherche...';
+            originalBtn.disabled = true;
+            
+            fetch('/api/search_ticker/' + encodeURIComponent(ticker))
                 .then(r => r.json())
                 .then(data => {
+                    originalBtn.innerHTML = originalText;
+                    originalBtn.disabled = false;
+                    
                     if (data.price) {
                         form.nom.value = data.name || ticker;
                         form.prix_achat.value = data.price;
                         form.prix_actuel.value = data.price;
+                        form.querySelector('input[name="nom"]').focus();
                     } else {
-                        alert('Ticker non trouvé');
+                        alert('Action non trouvée. Vérifiez le nom, le symbole (ex: TSLA, OR.PA) ou le code ISIN.');
                     }
+                })
+                .catch(err => {
+                    originalBtn.innerHTML = originalText;
+                    originalBtn.disabled = false;
+                    alert('Erreur de connexion à l\'API');
                 });
         }
         
