@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MonPecule - Tableau de Bord</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; }
+        .header { background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { color: #333; }
+        .btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.3s; }
+        .btn-logout { background: #dc3545; color: white; }
+        .btn-update { background: #28a745; color: white; margin-right: 10px; }
+        .stats { display: flex; gap: 20px; padding: 30px; max-width: 1400px; margin: 0 auto; }
+        .stat-card { flex: 1; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .stat-value { font-size: 2rem; font-weight: bold; color: #667eea; }
+        .comptes-container { display: flex; gap: 20px; padding: 0 30px 30px; max-width: 1400px; margin: 0 auto; flex-wrap: wrap; }
+        .compte-card { flex: 1; min-width: 300px; background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .compte-card h3 { margin-bottom: 15px; color: #333; }
+        .actif-item { background: #f8f9fa; padding: 12px; margin-bottom: 10px; border-radius: 8px; border-left: 5px solid #007bff; }
+        .actif-nom { font-weight: bold; font-size: 1.1rem; margin-bottom: 5px; }
+        .actif-details { font-size: 0.9rem; color: #666; }
+        .pv-positive { color: #28a745; font-weight: bold; }
+        .pv-negative { color: #dc3545; font-weight: bold; }
+        .form-inline { display: flex; gap: 10px; margin-top: 15px; }
+        .form-inline input { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 5px; }
+        .form-inline button { padding: 8px 15px; }
+        .btn-small { padding: 5px 10px; font-size: 0.85rem; margin-right: 5px; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); }
+        .modal-content { background: white; margin: 50px auto; padding: 30px; width: 90%; max-width: 500px; border-radius: 15px; }
+        .close { float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>💰 MonPecule - {{ user_nom }}</h1>
+        <div>
+            <button class="btn btn-update" onclick="updatePrices()">🔄 Mise à jour</button>
+            <a href="{{ url_for('logout') }}"><button class="btn btn-logout">🚪 Déconnexion</button></a>
+        </div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat-card">
+            <div>Plus-value Totale</div>
+            <div class="stat-value" style="color: {% if total_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}">{{ "%.2f"|format(total_pv) }} €</div>
+        </div>
+    </div>
+    
+    <div class="comptes-container">
+        {% for compte in comptes %}
+        <div class="compte-card">
+            <h3>🏦 {{ compte.nom_compte }}</h3>
+            
+            {% for actif in actifs %}
+                {% if actif.compte_id == compte.id %}
+                    {% set val_actuelle = (actif.prix_actuel * actif.quantite) + actif.frais %}
+                    {% set val_achat = (actif.prix_achat * actif.quantite) + actif.frais %}
+                    {% set pv = val_actuelle - val_achat %}
+                    
+                    <div class="actif-item">
+                        <div class="actif-nom">{{ actif.nom_actif }}</div>
+                        <div class="actif-details">
+                            <b>Cours achat:</b> {{ "%.2f"|format(actif.prix_achat) }}€ | <b>Total Achat:</b> {{ "%.2f"|format(val_achat) }}€<br>
+                            <b>Cours Actuel:</b> {{ "%.2f"|format(actif.prix_actuel) }}€ | <b>Total Actuel:</b> {{ "%.2f"|format(val_actuelle) }}€<br>
+                            <span class="{% if pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">Plus-value: {{ "%.2f"|format(pv) }}€</span>
+                        </div>
+                        <div style="margin-top: 8px;">
+                            <button class="btn btn-small" onclick="editActif({{ actif.id }}, '{{ actif.nom_actif }}', {{ actif.prix_achat }}, {{ actif.quantite }}, {{ actif.frais }}, {{ actif.prix_actuel }})">📝</button>
+                            <a href="{{ url_for('delete_actif', actif_id=actif.id) }}" onclick="return confirm('Supprimer ce titre ?')"><button class="btn btn-small" style="background: #dc3545;">🗑️</button></a>
+                        </div>
+                    </div>
+                {% endif %}
+            {% endfor %}
+            
+            <form method="POST" action="{{ url_for('add_actif') }}" style="margin-top: 20px; padding-top: 15px; border-top: 2px solid #eee;">
+                <input type="hidden" name="compte_id" value="{{ compte.id }}">
+                <input type="text" name="ticker" placeholder="Symbole, Nom ou ISIN" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <button type="button" class="btn" style="width: 100%; margin-bottom: 10px; background: #17a2b8;" onclick="searchTicker(this.form)">🔍 Rechercher</button>
+                <input type="text" name="nom" placeholder="Nom" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                    <input type="number" step="0.01" name="prix_achat" placeholder="Cours achat" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                    <input type="number" name="quantite" value="1" min="1" placeholder="Qté" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                </div>
+                <input type="number" step="0.01" name="frais" placeholder="Frais" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <input type="number" step="0.01" name="prix_actuel" placeholder="Cours actuel" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <button type="submit" class="btn" style="background: #667eea; width: 100%;">Enregistrer</button>
+            </form>
+        </div>
+        {% endfor %}
+        
+        <div class="compte-card">
+            <h3>➕ Nouveau Compte</h3>
+            <form method="POST" action="{{ url_for('add_compte') }}">
+                <input type="text" name="nom_compte" placeholder="Nom du compte" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <button type="submit" class="btn" style="background: #28a745; width: 100%;">Créer</button>
+            </form>
+        </div>
+    </div>
+    
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2>Modifier le titre</h2>
+            <form id="editForm" method="POST">
+                <div class="form-group">
+                    <label>Nom</label>
+                    <input type="text" name="nom" id="edit_nom">
+                </div>
+                <div class="form-group">
+                    <label>Cours achat</label>
+                    <input type="number" step="0.01" name="prix_achat" id="edit_pa">
+                </div>
+                <div class="form-group">
+                    <label>Quantité</label>
+                    <input type="number" name="quantite" id="edit_q">
+                </div>
+                <div class="form-group">
+                    <label>Frais</label>
+                    <input type="number" step="0.01" name="frais" id="edit_fr">
+                </div>
+                <div class="form-group">
+                    <label>Cours actuel</label>
+                    <input type="number" step="0.01" name="prix_actuel" id="edit_pnow">
+                </div>
+                <button type="submit" class="btn" style="background: #28a745;">Sauvegarder</button>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        function editActif(id, nom, pa, q, fr, pnow) {
+            document.getElementById('editForm').action = '/update_actif/' + id;
+            document.getElementById('edit_nom').value = nom;
+            document.getElementById('edit_pa').value = pa;
+            document.getElementById('edit_q').value = q;
+            document.getElementById('edit_fr').value = fr;
+            document.getElementById('edit_pnow').value = pnow;
+            document.getElementById('editModal').style.display = 'block';
+        }
+        
+        function closeModal() {
+            document.getElementById('editModal').style.display = 'none';
+        }
+        
+        function searchTicker(form) {
+            const ticker = form.ticker.value;
+            if (!ticker) return;
+            
+            fetch('/api/search_ticker/' + ticker)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.price) {
+                        form.nom.value = data.name || ticker;
+                        form.prix_achat.value = data.price;
+                        form.prix_actuel.value = data.price;
+                    } else {
+                        alert('Ticker non trouvé');
+                    }
+                });
+        }
+        
+        function updatePrices() {
+            if (!confirm('Actualiser tous les cours ?')) return;
+            fetch('/api/update_prices')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Cours mis à jour !');
+                        location.reload();
+                    }
+                });
+        }
+        
+        window.onclick = function(event) {
+            const modal = document.getElementById('editModal');
+            if (event.target == modal) closeModal();
+        }
+    </script>
+</body>
+</html>
