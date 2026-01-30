@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 import sqlite3
 import hashlib
-import requests
+import yfinance as yf
 from datetime import datetime
 
 app = Flask(__name__)
@@ -9,7 +9,6 @@ app.secret_key = 'monpecule_secret_key_2026_change_this_in_production'
 
 # --- CONFIGURATION ---
 DB_PATH = 'monpecule.db'
-FMP_API_KEY = "qvnX5eR9PdCZ5KhoqmEO2OrjO3q0ThcF"
 
 # --- UTILS ---
 def hash_password(password):
@@ -37,54 +36,40 @@ def init_db():
 
 init_db()
 
-# --- API FINANCIAL MODELING PREP ---
+# --- API YAHOO FINANCE (yfinance) ---
 def fetch_price_from_api(identifier):
     """
-    Recherche une action par nom, symbole (AAPL, TSLA, OR.PA) ou ISIN
-    Utilise Financial Modeling Prep API (250 requêtes/jour gratuit)
+    Recherche une action par symbole (AAPL, TSLA, BNP.PA, OR.PA)
+    Utilise Yahoo Finance via yfinance (gratuit, illimité, délai 15 min)
     """
     if not identifier: return None, None
     
-    identifier = identifier.strip()
+    identifier = identifier.strip().upper()
     
     try:
-        # Essai 1: Recherche directe par symbole (AAPL, TSLA, etc.)
-        symbol = identifier.upper()
-        res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
-                          params={'symbol': symbol, 'apikey': FMP_API_KEY})
+        # Créer un objet Ticker
+        ticker = yf.Ticker(identifier)
         
-        if res.status_code == 200:
-            data = res.json()
-            if data and len(data) > 0:
-                price = data[0].get('price')
-                name = data[0].get('name', symbol)
-                return (round(price, 2) if price else None, name)
+        # Récupérer les infos
+        info = ticker.info
         
-        # Essai 2: Recherche par nom de société ou ISIN
-        search_res = requests.get(f"https://financialmodelingprep.com/stable/search-symbol", 
-                                params={'query': identifier, 'apikey': FMP_API_KEY})
+        # Vérifier si le ticker existe
+        if not info or 'symbol' not in info:
+            return None, None
         
-        if search_res.status_code == 200:
-            search_data = search_res.json()
-            if search_data and len(search_data) > 0:
-                # Prendre le premier résultat
-                first_result = search_data[0]
-                symbol = first_result.get('symbol')
-                name = first_result.get('name', symbol)
-                
-                # Récupérer le prix pour ce symbole
-                price_res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
-                                       params={'symbol': symbol, 'apikey': FMP_API_KEY})
-                if price_res.status_code == 200:
-                    price_data = price_res.json()
-                    if price_data and len(price_data) > 0:
-                        price = price_data[0].get('price')
-                        return (round(price, 2) if price else None, name)
+        # Récupérer le prix actuel
+        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+        
+        # Récupérer le nom
+        name = info.get('longName') or info.get('shortName') or identifier
+        
+        if price:
+            return (round(float(price), 2), name)
         
         return None, None
         
     except Exception as e:
-        print(f"Erreur API FMP: {e}")
+        print(f"Erreur yfinance: {e}")
         return None, None
 
 # --- ROUTES ---
@@ -239,16 +224,15 @@ def update_prices():
         try:
             for ticker_row in tickers:
                 symbol = ticker_row['ticker']
-                res = requests.get(f"https://financialmodelingprep.com/stable/quote", 
-                                  params={'symbol': symbol, 'apikey': FMP_API_KEY})
-                if res.status_code == 200:
-                    data = res.json()
-                    if data and len(data) > 0:
-                        price = data[0].get('price')
-                        if price:
-                            conn.execute('UPDATE actifs SET prix_actuel = ? WHERE UPPER(ticker_isin) = ?', 
-                                       (price, symbol.upper()))
-                            updated += 1
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                
+                if info and 'symbol' in info:
+                    price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+                    if price:
+                        conn.execute('UPDATE actifs SET prix_actuel = ? WHERE UPPER(ticker_isin) = ?', 
+                                   (float(price), symbol.upper()))
+                        updated += 1
             conn.commit()
             conn.close()
             return jsonify({'success': True, 'message': f'{updated} cours mis à jour'})
