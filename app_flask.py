@@ -41,16 +41,33 @@ init_db()
 def fetch_price_from_api(identifier):
     if not identifier: return None, None
     try:
-        res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
-                          params={'access_key': MARKETSTACK_API_KEY, 'symbols': identifier})
-        data = res.json()
-        price = data['data'][0].get('close') if res.status_code == 200 and 'data' in data and data['data'] else None
+        # 1. On essaie de chercher le ticker si ce n'est pas un symbole direct
+        search_res = requests.get(f"http://api.marketstack.com/v1/tickers", 
+                                params={'access_key': MARKETSTACK_API_KEY, 'search': identifier})
         
-        res2 = requests.get(f"http://api.marketstack.com/v1/tickers/{identifier}", 
-                           params={'access_key': MARKETSTACK_API_KEY})
-        name = res2.json().get('name', identifier) if res2.status_code == 200 else identifier
+        symbol = identifier.upper()
+        name = identifier
+        
+        if search_res.status_code == 200:
+            data = search_res.json()
+            if 'data' in data and len(data['data']) > 0:
+                symbol = data['data'][0]['symbol']
+                name = data['data'][0]['name']
+
+        # 2. On récupère le prix pour ce symbole
+        res = requests.get(f"http://api.marketstack.com/v1/eod/latest", 
+                          params={'access_key': MARKETSTACK_API_KEY, 'symbols': symbol})
+        
+        price = None
+        if res.status_code == 200:
+            data = res.json()
+            if 'data' in data and len(data['data']) > 0:
+                price = data['data'][0].get('close')
+        
         return (round(price, 2) if price else None, name)
-    except: return None, None
+    except Exception as e:
+        print(f"Erreur API: {e}")
+        return None, None
 
 # --- ROUTES ---
 @app.route('/')
