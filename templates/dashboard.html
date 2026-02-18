@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MonPecule - Tableau de Bord</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; }
@@ -12,8 +13,8 @@
         .btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.3s; }
         .btn-logout { background: #dc3545; color: white; }
         .btn-update { background: #28a745; color: white; margin-right: 10px; }
-        .stats { display: flex; gap: 20px; padding: 30px; max-width: 1400px; margin: 0 auto; }
-        .stat-card { flex: 1; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; padding: 30px; max-width: 1600px; margin: 0 auto; }
+        .stat-card { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
         .stat-value { font-size: 2rem; font-weight: bold; color: #667eea; }
         .comptes-container { display: flex; gap: 20px; padding: 0 30px 30px; max-width: 1400px; margin: 0 auto; flex-wrap: wrap; }
         .compte-card { flex: 1; min-width: 300px; background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
@@ -30,45 +31,157 @@
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); }
         .modal-content { background: white; margin: 50px auto; padding: 30px; width: 90%; max-width: 500px; border-radius: 15px; }
         .close { float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; color: #333; }
+        .form-group input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+        
+        .top-performers { max-width: 1400px; margin: 0 auto; padding: 0 30px 20px; display: flex; gap: 15px; }
+        .performer-card { flex: 1; padding: 15px 20px; border-radius: 12px; color: white; }
+        
+        /* Responsive Mobile */
+        @media (max-width: 768px) {
+            .header { flex-direction: column; gap: 10px; text-align: center; }
+            .header h1 { font-size: 1.5rem; }
+            .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 15px; }
+            .stat-card { padding: 15px; }
+            .stat-card div:first-child { font-size: 0.85rem; }
+            .stat-value { font-size: 1.3rem !important; }
+            .comptes-container { padding: 0 15px 15px; }
+            .compte-card { min-width: 100%; }
+            .top-performers { padding: 0 15px 15px; flex-direction: column; }
+            .performer-card { font-size: 0.9rem; }
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>💰 MonPecule - {{ user_nom }}</h1>
-        <div>
+        <h1>💰 MonPecule - Bonjour {{ user_nom }}</h1>
+        <div style="text-align: right;">
+            <div style="font-size: 0.8rem; color: #666; margin-bottom: 5px;">
+                Dernière MAJ: {{ derniere_maj }} | 
+                Devise: 
+                <select onchange="window.location.href='/change_currency/'+this.value" style="padding: 3px 8px; border: 1px solid #ddd; border-radius: 5px; background: white; cursor: pointer;">
+                    <option value="EUR" {% if user_devise == 'EUR' %}selected{% endif %}>EUR (€)</option>
+                    <option value="USD" {% if user_devise == 'USD' %}selected{% endif %}>USD ($)</option>
+                    <option value="GBP" {% if user_devise == 'GBP' %}selected{% endif %}>GBP (£)</option>
+                </select>
+            </div>
             <button class="btn btn-update" onclick="updatePrices()">🔄 Mise à jour</button>
+            <button onclick="openConseil()" class="btn" style="background: #ffc107; color: #333; margin-right: 10px;">💡 Conseil du jour</button>
+            <a href="/conseil-etf" class="btn" style="background: #17a2b8; color: white; margin-right: 10px; text-decoration: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; font-size: 0.85rem;">🌍 Conseils ETF</a>
             <a href="{{ url_for('logout') }}"><button class="btn btn-logout">🚪 Déconnexion</button></a>
         </div>
     </div>
     
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div style="max-width: 1400px; margin: 20px auto; padding: 0 30px;">
+            {% for category, message in messages %}
+                <div style="background: {% if category == 'success' %}#d4edda{% else %}#f8d7da{% endif %}; 
+                            color: {% if category == 'success' %}#155724{% else %}#721c24{% endif %}; 
+                            padding: 12px 20px; border-radius: 8px; margin-bottom: 10px; 
+                            border-left: 4px solid {% if category == 'success' %}#28a745{% else %}#dc3545{% endif %};">
+                    {{ message }}
+                </div>
+            {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+    
     <div class="stats">
         <div class="stat-card">
+            <div>Total Investi</div>
+            <div class="stat-value" style="color: #333; font-size: 1.5rem;">{{ "%.0f"|format(total_achat|convert(user_devise)) }} {{ currency_symbol }}</div>
+        </div>
+        <div class="stat-card">
+            <div>Valeur Actuelle</div>
+            <div class="stat-value" style="color: #667eea; font-size: 1.5rem;">{{ "%.0f"|format(total_actuel|convert(user_devise)) }} {{ currency_symbol }}</div>
+        </div>
+        <div class="stat-card">
             <div>Plus-value Totale</div>
-            <div class="stat-value" style="color: {% if total_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}">{{ "%.2f"|format(total_pv) }} €</div>
+            <div class="stat-value" style="color: {% if total_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}; font-size: 1.5rem;">{{ "%.0f"|format(total_pv|convert(user_devise)) }} {{ currency_symbol }}</div>
+        </div>
+        <div class="stat-card">
+            <div>Plus-value du Jour</div>
+            <div class="stat-value" style="color: {% if total_day_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}; font-size: 1.5rem;">{{ "%.0f"|format(total_day_pv|convert(user_devise)) }} {{ currency_symbol }}</div>
+        </div>
+        <div class="stat-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <span>Plus-value du Mois</span>
+                <button onclick="if(confirm('Réinitialiser la PV du mois à 0 ?')) window.location.href='/reset_pv_mois'" 
+                        style="background: #6c757d; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; cursor: pointer; margin-left: 5px;" 
+                        title="Réinitialiser la PV du mois">↻</button>
+            </div>
+            <div class="stat-value" style="color: {% if total_month_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}; font-size: 1.5rem;">{{ "%.0f"|format(total_month_pv|convert(user_devise)) }} {{ currency_symbol }}</div>
         </div>
     </div>
+    
+    {% if top_gainer or top_loser %}
+    <div class="top-performers">
+        {% if top_gainer %}
+        <div class="performer-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); box-shadow: 0 4px 15px rgba(40, 167, 69, 0.3);">
+            <div style="font-size: 0.85rem; opacity: 0.9; margin-bottom: 5px;">📈 Meilleure Performance du Jour</div>
+            <div style="font-size: 1.2rem; font-weight: bold;">{{ top_gainer.nom }}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; margin-top: 5px;">+{{ "%.1f"|format(top_gainer.perf) }}%</div>
+        </div>
+        {% endif %}
+        {% if top_loser %}
+        <div class="performer-card" style="background: linear-gradient(135deg, #dc3545 0%, #e35d6a 100%); box-shadow: 0 4px 15px rgba(220, 53, 69, 0.3);">
+            <div style="font-size: 0.85rem; opacity: 0.9; margin-bottom: 5px;">📉 Plus Forte Baisse du Jour</div>
+            <div style="font-size: 1.2rem; font-weight: bold;">{{ top_loser.nom }}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; margin-top: 5px;">{{ "%.1f"|format(top_loser.perf) }}%</div>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
     
     <div class="comptes-container">
         {% for compte in comptes %}
         <div class="compte-card">
-            <h3>🏦 {{ compte.nom_compte }}</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3 style="margin: 0;">🏦 {{ compte.nom_compte }}</h3>
+                <a href="{{ url_for('delete_compte', compte_id=compte.id) }}" onclick="return confirm('Supprimer ce compte et tous ses titres ?')" style="text-decoration: none; color: #dc3545; font-size: 1.2rem;" title="Supprimer le compte">🗑️</a>
+            </div>
+
+            <div style="background: #eef2f7; padding: 12px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #d1d9e6;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><b>Total Achat:</b></div><div style="text-align: right;">{{ "%.0f"|format(comptes_stats[compte.id]['achat']|convert(user_devise)) }} {{ currency_symbol }}</div>
+                    <div><b>Total Actuel:</b></div><div style="text-align: right;">{{ "%.0f"|format(comptes_stats[compte.id]['actuel']|convert(user_devise)) }} {{ currency_symbol }}</div>
+                    <div><b>Plus-value:</b></div><div style="text-align: right;" class="{% if comptes_stats[compte.id]['pv'] >= 0 %}pv-positive{% else %}pv-negative{% endif %}">{{ "%.0f"|format(comptes_stats[compte.id]['pv']|convert(user_devise)) }} {{ currency_symbol }}</div>
+                    <div><b>PV Jour:</b></div><div style="text-align: right;" class="{% if comptes_stats[compte.id]['day_pv'] >= 0 %}pv-positive{% else %}pv-negative{% endif %}">{{ "%.0f"|format(comptes_stats[compte.id]['day_pv']|convert(user_devise)) }} {{ currency_symbol }}</div>
+                </div>
+            </div>
             
             {% for actif in actifs %}
                 {% if actif.compte_id == compte.id %}
                     {% set val_actuelle = (actif.prix_actuel * actif.quantite) + actif.frais %}
                     {% set val_achat = (actif.prix_achat * actif.quantite) + actif.frais %}
                     {% set pv = val_actuelle - val_achat %}
+                    {% set day_pv = (actif.prix_actuel - actif.prix_veille) * actif.quantite %}
                     
-                    <div class="actif-item">
-                        <div class="actif-nom">{{ actif.nom_actif }}</div>
+                    <div class="actif-item" onclick="openYahoo('{{ actif.ticker_isin }}')" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" onmouseout="this.style.transform=''; this.style.boxShadow='';">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 5px;">
+                            <div class="actif-nom">{{ actif.nom_actif }}</div>
+                            <div style="text-align: right;">
+                                {% if actif.date_achat %}
+                                    <div style="font-size: 0.85rem; color: #888;">{{ actif.date_achat|format_date }}</div>
+                                {% endif %}
+                                {% set perf_pct = ((actif.prix_actuel - actif.prix_achat) / actif.prix_achat * 100) if actif.prix_achat > 0 else 0 %}
+                                <div style="font-size: 0.85rem; font-weight: bold;" class="{% if perf_pct >= 0 %}pv-positive{% else %}pv-negative{% endif %}">
+                                    {{ "%.1f"|format(perf_pct) }}%
+                                </div>
+                            </div>
+                        </div>
+                        {% set actif_devise = actif.devise_cotation or 'EUR' %}
+                        {% set actif_symbol = '£' if actif_devise == 'GBP' else ('$' if actif_devise == 'USD' else '€') %}
                         <div class="actif-details">
-                            <b>Cours achat:</b> {{ "%.2f"|format(actif.prix_achat) }}€ | <b>Total Achat:</b> {{ "%.2f"|format(val_achat) }}€<br>
-                            <b>Cours Actuel:</b> {{ "%.2f"|format(actif.prix_actuel) }}€ | <b>Total Actuel:</b> {{ "%.2f"|format(val_actuelle) }}€<br>
-                            <span class="{% if pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">Plus-value: {{ "%.2f"|format(pv) }}€</span>
+                            <b>Total Achat:</b> {{ "%.0f"|format(val_achat) }}{{ actif_symbol }} | <b>Total Actuel:</b> {{ "%.0f"|format(val_actuelle) }}{{ actif_symbol }}<br>
+                            <b>Cours Achat:</b> {{ "%.2f"|format(actif.prix_achat) }}{{ actif_symbol }} | <b>Cours Actuel:</b> {{ "%.2f"|format(actif.prix_actuel) }}{{ actif_symbol }}<br>
+                            <b>Variation Jour:</b> <span class="{% if day_pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">{{ "%.0f"|format(day_pv) }}{{ actif_symbol }}</span> | <span class="{% if pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">PV Totale: {{ "%.0f"|format(pv) }}{{ actif_symbol }}</span>
                         </div>
                         <div style="margin-top: 8px;">
-                            <button class="btn btn-small" onclick="editActif({{ actif.id }}, '{{ actif.nom_actif }}', {{ actif.prix_achat }}, {{ actif.quantite }}, {{ actif.frais }}, {{ actif.prix_actuel }})">📝</button>
-                            <a href="{{ url_for('delete_actif', actif_id=actif.id) }}" onclick="return confirm('Supprimer ce titre ?')"><button class="btn btn-small" style="background: #dc3545;">🗑️</button></a>
+                            <button class="btn btn-small" onclick="event.stopPropagation(); editActif({{ actif.id }}, '{{ actif.nom_actif|replace("'", "\\'") }}', {{ actif.prix_achat }}, {{ actif.quantite }}, {{ actif.frais }}, {{ actif.prix_actuel }}, '{{ actif.date_achat or '' }}', '{{ actif_devise }}')">📝</button>
+                            <a href="{{ url_for('delete_actif', actif_id=actif.id) }}" onclick="event.stopPropagation(); return confirm('Supprimer ce titre ?')"><button class="btn btn-small" style="background: #dc3545;">🗑️</button></a>
                         </div>
                     </div>
                 {% endif %}
@@ -76,15 +189,23 @@
             
             <form method="POST" action="{{ url_for('add_actif') }}" style="margin-top: 20px; padding-top: 15px; border-top: 2px solid #eee;">
                 <input type="hidden" name="compte_id" value="{{ compte.id }}">
+                <input type="hidden" name="prix_actuel" id="prix_actuel_hidden_{{ compte.id }}">
+                <input type="hidden" name="prix_veille" id="prix_veille_hidden_{{ compte.id }}">
                 <input type="text" name="ticker" placeholder="Tapez le nom (Tesla), symbole (TSLA) ou ISIN puis Entrée" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;" onkeypress="if(event.key === 'Enter') { event.preventDefault(); searchTicker(this.form); }">
                 <button type="button" class="btn" style="width: 100%; margin-bottom: 10px; background: #17a2b8;" onclick="searchTicker(this.form)">🔍 Rechercher</button>
                 <input type="text" name="nom" placeholder="Nom" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
-                    <input type="number" step="0.01" name="prix_achat" placeholder="Cours achat" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
-                    <input type="number" name="quantite" value="1" min="1" placeholder="Qté" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                    <input type="number" step="0.01" name="prix_achat" placeholder="Cours achat" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;" oninput="calculateTotal(this.form)">
+                    <input type="number" name="quantite" value="1" min="1" placeholder="Qté" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;" oninput="calculateTotal(this.form)">
                 </div>
-                <input type="number" step="0.01" name="frais" placeholder="Frais" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
-                <input type="number" step="0.01" name="prix_actuel" placeholder="Cours actuel" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                    <input type="number" step="0.01" name="frais" placeholder="Frais" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;" oninput="calculateTotal(this.form)">
+                    <input type="date" name="date_achat" placeholder="Date d'achat" style="padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                </div>
+                <div style="margin-bottom: 10px;">
+                    <label style="font-size: 0.8rem; color: #666;">Total investi (Auto)</label>
+                    <input type="number" step="0.01" name="total_display" placeholder="Total" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; background: #f8f9fa;" readonly>
+                </div>
                 <button type="submit" class="btn" style="background: #667eea; width: 100%;">Enregistrer</button>
             </form>
         </div>
@@ -109,7 +230,7 @@
                     <input type="text" name="nom" id="edit_nom">
                 </div>
                 <div class="form-group">
-                    <label>Cours achat</label>
+                    <label>Cours achat ({{ currency_symbol }})</label>
                     <input type="number" step="0.01" name="prix_achat" id="edit_pa">
                 </div>
                 <div class="form-group">
@@ -117,12 +238,16 @@
                     <input type="number" name="quantite" id="edit_q">
                 </div>
                 <div class="form-group">
-                    <label>Frais</label>
+                    <label>Frais ({{ currency_symbol }})</label>
                     <input type="number" step="0.01" name="frais" id="edit_fr">
                 </div>
                 <div class="form-group">
-                    <label>Cours actuel</label>
+                    <label>Cours actuel ({{ currency_symbol }})</label>
                     <input type="number" step="0.01" name="prix_actuel" id="edit_pnow">
+                </div>
+                <div class="form-group">
+                    <label>Date d'achat</label>
+                    <input type="date" name="date_achat" id="edit_date">
                 </div>
                 <button type="submit" class="btn" style="background: #28a745;">Sauvegarder</button>
             </form>
@@ -130,18 +255,48 @@
     </div>
     
     <script>
-        function editActif(id, nom, pa, q, fr, pnow) {
+        // Symboles de devise
+        const currencySymbols = { 'EUR': '€', 'USD': '$', 'GBP': '£' };
+        
+        function editActif(id, nom, pa, q, fr, pnow, date_achat, devise_cotation) {
             document.getElementById('editForm').action = '/update_actif/' + id;
             document.getElementById('edit_nom').value = nom;
-            document.getElementById('edit_pa').value = pa;
+            // Les valeurs sont déjà dans la devise de cotation, pas de conversion nécessaire
+            document.getElementById('edit_pa').value = pa.toFixed(2);
             document.getElementById('edit_q').value = q;
-            document.getElementById('edit_fr').value = fr;
-            document.getElementById('edit_pnow').value = pnow;
+            document.getElementById('edit_fr').value = fr.toFixed(2);
+            document.getElementById('edit_pnow').value = pnow.toFixed(2);
+            document.getElementById('edit_date').value = date_achat || '';
+            
+            // Mettre à jour les labels avec le bon symbole de devise
+            const symbol = currencySymbols[devise_cotation] || '€';
+            document.querySelectorAll('.form-group label').forEach(label => {
+                if (label.textContent.includes('Cours achat')) label.textContent = `Cours achat (${symbol})`;
+                if (label.textContent.includes('Frais')) label.textContent = `Frais (${symbol})`;
+                if (label.textContent.includes('Cours actuel')) label.textContent = `Cours actuel (${symbol})`;
+            });
+            
             document.getElementById('editModal').style.display = 'block';
         }
         
         function closeModal() {
             document.getElementById('editModal').style.display = 'none';
+        }
+
+        function calculateTotal(form) {
+            const pa = parseFloat(form.prix_achat.value) || 0;
+            const q = parseInt(form.quantite.value) || 0;
+            const fr = parseFloat(form.frais.value) || 0;
+            const total = (pa * q) + fr;
+            
+            if (form.total_display) {
+                form.total_display.value = total.toFixed(2);
+            }
+            
+            // On met à jour le cours unitaire actuel (caché) qui est égal au cours d'achat à la création
+            if (form.prix_actuel) {
+                form.prix_actuel.value = pa;
+            }
         }
         
         function searchTicker(form) {
@@ -163,7 +318,8 @@
                     if (data.price) {
                         form.nom.value = data.name || ticker;
                         form.prix_achat.value = data.price;
-                        form.prix_actuel.value = data.price;
+                        if (form.prix_veille) form.prix_veille.value = data.prev_close || data.price;
+                        calculateTotal(form); // Calcul automatique du total après recherche
                         form.querySelector('input[name="nom"]').focus();
                     } else {
                         alert('Action non trouvée. Vérifiez le nom, le symbole (ex: TSLA, OR.PA) ou le code ISIN.');
@@ -177,15 +333,52 @@
         }
         
         function updatePrices() {
-            if (!confirm('Actualiser tous les cours ?')) return;
+            if (!confirm('Actualiser tous les cours ? Cela prendra environ 40 secondes.')) return;
+            
+            const btn = document.querySelector('.btn-update');
+            const originalText = btn.innerHTML;
+            let secondsLeft = 40;
+            
+            btn.disabled = true;
+            
             fetch('/api/update_prices')
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        alert('Cours mis à jour !');
-                        location.reload();
+                        // Décompte avant rechargement
+                        const countdown = setInterval(() => {
+                            btn.innerHTML = `⏳ Actualisation dans ${secondsLeft}s...`;
+                            secondsLeft--;
+                            
+                            if (secondsLeft <= 0) {
+                                clearInterval(countdown);
+                                // Forcer rechargement sans cache
+                                window.location.href = window.location.href.split('?')[0] + '?t=' + new Date().getTime();
+                            }
+                        }, 1000);
+                    } else {
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
+                        alert('❌ Erreur lors de la mise à jour');
                     }
+                })
+                .catch(err => {
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
+                    alert('❌ Erreur de connexion à l\'API');
+                    console.error(err);
                 });
+        }
+        
+        function openConseil() {
+            window.location.href = '/conseil-du-jour';
+        }
+        
+        function openYahoo(ticker) {
+            // Ouvrir Yahoo Finance pour le ticker
+            if (!ticker) return;
+            const url = 'https://fr.finance.yahoo.com/quote/' + ticker;
+            window.open(url, '_blank');
         }
         
         window.onclick = function(event) {

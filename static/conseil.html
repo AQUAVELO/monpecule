@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Conseil du jour - En attente</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 60px 40px;
+            max-width: 600px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            color: #2C3E50;
+            font-size: 2.5em;
+            margin-bottom: 20px;
+        }
+        
+        .emoji {
+            font-size: 5em;
+            margin-bottom: 20px;
+        }
+        
+        p {
+            color: #7F8C8D;
+            font-size: 1.2em;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        
+        .btn {
+            display: inline-block;
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: bold;
+            transition: transform 0.3s ease;
+        }
+        
+        .btn:hover {
+            transform: scale(1.05);
+        }
+        
+        .instructions {
+            margin-top: 40px;
+            padding: 20px;
+            background: #F8F9FA;
+            border-radius: 15px;
+            text-align: left;
+        }
+        
+        .instructions h3 {
+            color: #2C3E50;
+            margin-bottom: 15px;
+        }
+        
+        .instructions ol {
+            color: #7F8C8D;
+            margin-left: 20px;
+        }
+        
+        .instructions li {
+            margin-bottom: 10px;
+        }
+        
+        code {
+            background: #E8E8E8;
+            padding: 2px 8px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            color: #E74C3C;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="emoji">📊</div>
+        <h1>Conseil du jour</h1>
+        <p>L'analyse de sentiment Euronext n'a pas encore été générée.</p>
+        
+        <a href="javascript:history.back()" class="btn">← Retour au dashboard</a>
+        
+        <div class="instructions">
+            <h3>📋 Comment générer l'analyse ?</h3>
+            <ol>
+                <li>Placez votre script Python <code>sentiment_analysis.py</code> dans le dossier du projet</li>
+                <li>Exécutez le script de mise à jour :
+                    <br><code>./update_conseil.sh</code>
+                </li>
+                <li>Déployez l'application :
+                    <br><code>fly deploy</code>
+                </li>
+            </ol>
+        </div>
+    </div>
+</body>
+</html>
