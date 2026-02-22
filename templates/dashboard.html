@@ -195,18 +195,19 @@
                     {% set pv = val_actuelle - val_achat %}
                     {% set day_pv = (actif.prix_actuel - actif.prix_veille) * actif.quantite %}
                     
-                    <div class="actif-item" onclick="openYahoo('{{ actif.ticker_isin }}')" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" onmouseout="this.style.transform=''; this.style.boxShadow='';">
+                    <div class="actif-item" style="transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" onmouseout="this.style.transform=''; this.style.boxShadow='';">
                         <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 5px;">
                             <div class="actif-nom">
                             {{ actif.nom_actif }}
                             <div style="font-size: 0.8rem; color: #666; font-weight: normal; margin-top: 2px;">
                                 {{ actif.ticker_isin }} <span style="margin-left: 8px; background: #e9ecef; padding: 2px 6px; border-radius: 4px;">x{{ actif.quantite }}</span>
+                                <a href="https://fr.finance.yahoo.com/quote/{{ actif.ticker_isin }}" target="_blank" style="margin-left: 8px; color: #17a2b8; text-decoration: none; font-size: 0.75rem;" title="Voir sur Yahoo Finance">📈 Yahoo</a>
 
                                 {% if trading_signals.get(actif.ticker_isin) %}
                                     {% set signal = trading_signals[actif.ticker_isin] %}
                                     <span class="{{ signal.signal_class }} signal-button"
                                           style="margin-left: 8px; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;"
-                                          onclick="event.stopPropagation(); openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
+                                          onclick="openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
                                           title="Cliquez pour voir l'analyse détaillée">
                                         {{ signal.signal_strength }} 🔍
                                     </span>
@@ -233,10 +234,11 @@
 
                         {% if trading_signals.get(actif.ticker_isin) %}
                             {% set signal = trading_signals[actif.ticker_isin] %}
-                            <div onclick="event.stopPropagation(); openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
+                            <div onclick="openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
                                  style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 6px; font-size: 0.85rem; cursor: pointer; transition: all 0.2s;"
                                  onmouseover="this.style.background='#e9ecef'; this.style.transform='translateY(-2px)'"
-                                 onmouseout="this.style.background='#f8f9fa'; this.style.transform='translateY(0)'">
+                                 onmouseout="this.style.background='#f8f9fa'; this.style.transform='translateY(0)'"
+                                 title="Cliquer pour voir l'analyse complète">
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; color: #555;">
                                     <div><b>Score Technique:</b> {{ "%.0f"|format(signal.technical_score) }}/100</div>
                                     <div><b>RSI(14):</b> {{ "%.1f"|format(signal.rsi_14) if signal.rsi_14 else 'N/A' }}</div>
@@ -245,14 +247,14 @@
                                 </div>
                                 <div style="margin-top: 5px; font-size: 0.75rem; color: #888; display: flex; justify-content: space-between; align-items: center;">
                                     <span>Dernière analyse: {{ signal.last_updated }}</span>
-                                    <span style="color: #667eea; font-weight: 600;">🔍 Voir l'analyse complète</span>
+                                    <span style="color: #667eea; font-weight: 600;">🔍 Voir l'analyse</span>
                                 </div>
                             </div>
                         {% endif %}
 
                         <div style="margin-top: 8px;">
-                            <button class="btn btn-small" onclick="event.stopPropagation(); editActif({{ actif.id }}, '{{ actif.nom_actif|replace("'", "\\'") }}', {{ actif.prix_achat }}, {{ actif.quantite }}, {{ actif.frais }}, {{ actif.prix_actuel }}, '{{ actif.date_achat or '' }}', '{{ actif_devise }}')">📝</button>
-                            <a href="{{ url_for('delete_actif', actif_id=actif.id) }}" onclick="event.stopPropagation(); return confirm('Supprimer ce titre ?')"><button class="btn btn-small" style="background: #dc3545;">🗑️</button></a>
+                            <button class="btn btn-small" onclick="editActif({{ actif.id }}, '{{ actif.nom_actif|replace("'", "\\'") }}', {{ actif.prix_achat }}, {{ actif.quantite }}, {{ actif.frais }}, {{ actif.prix_actuel }}, '{{ actif.date_achat or '' }}', '{{ actif_devise }}')">📝</button>
+                            <a href="{{ url_for('delete_actif', actif_id=actif.id) }}" onclick="return confirm('Supprimer ce titre ?')"><button class="btn btn-small" style="background: #dc3545;">🗑️</button></a>
                         </div>
                     </div>
                 {% endif %}
