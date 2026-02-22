@@ -207,7 +207,9 @@
                                     {% set signal = trading_signals[actif.ticker_isin] %}
                                     <span class="{{ signal.signal_class }} signal-button"
                                           style="margin-left: 8px; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;"
-                                          onclick="openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
+                                          data-signal='{{ signal|tojson }}'
+                                          data-ticker="{{ actif.ticker_isin }}"
+                                          onclick="openAnalysisModalFromElement(this)"
                                           title="Cliquez pour voir l'analyse détaillée">
                                         {{ signal.signal_strength }} 🔍
                                     </span>
@@ -234,7 +236,9 @@
 
                         {% if trading_signals.get(actif.ticker_isin) %}
                             {% set signal = trading_signals[actif.ticker_isin] %}
-                            <div onclick="openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
+                            <div data-signal='{{ signal|tojson }}'
+                                 data-ticker="{{ actif.ticker_isin }}"
+                                 onclick="openAnalysisModalFromElement(this)"
                                  style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 6px; font-size: 0.85rem; cursor: pointer; transition: all 0.2s;"
                                  onmouseover="this.style.background='#e9ecef'; this.style.transform='translateY(-2px)'"
                                  onmouseout="this.style.background='#f8f9fa'; this.style.transform='translateY(0)'"
@@ -597,6 +601,19 @@
 
             const analysisModal = document.getElementById('analysisModal');
             if (event.target == analysisModal) closeAnalysisModal();
+        }
+
+        // Fonction helper pour ouvrir la modale depuis un élément HTML
+        function openAnalysisModalFromElement(element) {
+            try {
+                const ticker = element.getAttribute('data-ticker');
+                const signalJson = element.getAttribute('data-signal');
+                const signalData = JSON.parse(signalJson);
+                openAnalysisModal(ticker, signalData);
+            } catch (e) {
+                console.error('Error opening analysis modal:', e);
+                alert('Erreur lors de l\'ouverture de l\'analyse. Veuillez réessayer.');
+            }
         }
 
         // Fonction pour ouvrir la modale d'analyse technique
