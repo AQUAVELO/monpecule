@@ -24,6 +24,21 @@
         .actif-details { font-size: 0.9rem; color: #666; }
         .pv-positive { color: #28a745; font-weight: bold; }
         .pv-negative { color: #dc3545; font-weight: bold; }
+        .signal-achat {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .signal-vente {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .signal-neutre {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
         .form-inline { display: flex; gap: 10px; margin-top: 15px; }
         .form-inline input { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 5px; }
         .form-inline button { padding: 8px 15px; }
@@ -34,9 +49,29 @@
         .form-group { margin-bottom: 15px; }
         .form-group label { display: block; margin-bottom: 5px; font-weight: bold; color: #333; }
         .form-group input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
-        
+
         .top-performers { max-width: 1400px; margin: 0 auto; padding: 0 30px 20px; display: flex; gap: 15px; }
         .performer-card { flex: 1; padding: 15px 20px; border-radius: 12px; color: white; }
+
+        /* Styles pour la fenêtre modale d'analyse technique */
+        .analysis-modal { display: none; position: fixed; z-index: 2000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); overflow-y: auto; }
+        .analysis-modal-content { background: white; margin: 30px auto; padding: 0; width: 90%; max-width: 700px; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); animation: slideIn 0.3s ease-out; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(-50px); } to { opacity: 1; transform: translateY(0); } }
+        .analysis-header { padding: 25px 30px; border-bottom: 2px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .analysis-body { padding: 30px; }
+        .signal-badge-large { display: inline-block; padding: 12px 24px; border-radius: 10px; font-weight: bold; font-size: 1.2rem; }
+        .indicator-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin: 20px 0; }
+        .indicator-card { background: #f8f9fa; padding: 15px; border-radius: 10px; border-left: 4px solid #667eea; }
+        .indicator-label { font-size: 0.85rem; color: #666; margin-bottom: 5px; }
+        .indicator-value { font-size: 1.3rem; font-weight: bold; color: #333; }
+        .score-bar { width: 100%; height: 30px; background: #e9ecef; border-radius: 15px; overflow: hidden; margin-top: 10px; position: relative; }
+        .score-fill { height: 100%; background: linear-gradient(90deg, #dc3545 0%, #ffc107 50%, #28a745 100%); transition: width 0.5s ease; }
+        .score-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-weight: bold; color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+        .prognosis-box { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 15px; margin-top: 20px; }
+        .prognosis-title { font-size: 1.1rem; font-weight: bold; margin-bottom: 10px; }
+        .prognosis-text { font-size: 0.95rem; line-height: 1.6; }
+        .signal-button { cursor: pointer; transition: all 0.2s; }
+        .signal-button:hover { transform: scale(1.05); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
         
         /* Responsive Mobile */
         @media (max-width: 768px) {
@@ -67,6 +102,7 @@
                 </select>
             </div>
             <button class="btn btn-update" onclick="updatePrices()">🔄 Mise à jour</button>
+            <button class="btn" onclick="updateTradingSignals(event)" style="background: #17a2b8; color: white; margin-right: 10px;">📊 Analyse Technique</button>
             <button onclick="openConseil()" class="btn" style="background: #ffc107; color: #333; margin-right: 10px;">💡 Conseil du jour</button>
             <a href="/conseil-etf" class="btn" style="background: #17a2b8; color: white; margin-right: 10px; text-decoration: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; font-size: 0.85rem;">🌍 Conseils ETF</a>
             <a href="{{ url_for('logout') }}"><button class="btn btn-logout">🚪 Déconnexion</button></a>
@@ -161,7 +197,22 @@
                     
                     <div class="actif-item" onclick="openYahoo('{{ actif.ticker_isin }}')" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" onmouseout="this.style.transform=''; this.style.boxShadow='';">
                         <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 5px;">
-                            <div class="actif-nom">{{ actif.nom_actif }}</div>
+                            <div class="actif-nom">
+                            {{ actif.nom_actif }}
+                            <div style="font-size: 0.8rem; color: #666; font-weight: normal; margin-top: 2px;">
+                                {{ actif.ticker_isin }} <span style="margin-left: 8px; background: #e9ecef; padding: 2px 6px; border-radius: 4px;">x{{ actif.quantite }}</span>
+
+                                {% if trading_signals.get(actif.ticker_isin) %}
+                                    {% set signal = trading_signals[actif.ticker_isin] %}
+                                    <span class="{{ signal.signal_class }} signal-button"
+                                          style="margin-left: 8px; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;"
+                                          onclick="event.stopPropagation(); openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
+                                          title="Cliquez pour voir l'analyse détaillée">
+                                        {{ signal.signal_strength }} 🔍
+                                    </span>
+                                {% endif %}
+                            </div>
+                        </div>
                             <div style="text-align: right;">
                                 {% if actif.date_achat %}
                                     <div style="font-size: 0.85rem; color: #888;">{{ actif.date_achat|format_date }}</div>
@@ -179,6 +230,26 @@
                             <b>Cours Achat:</b> {{ "%.2f"|format(actif.prix_achat) }}{{ actif_symbol }} | <b>Cours Actuel:</b> {{ "%.2f"|format(actif.prix_actuel) }}{{ actif_symbol }}<br>
                             <b>Variation Jour:</b> <span class="{% if day_pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">{{ "%.0f"|format(day_pv) }}{{ actif_symbol }}</span> | <span class="{% if pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">PV Totale: {{ "%.0f"|format(pv) }}{{ actif_symbol }}</span>
                         </div>
+
+                        {% if trading_signals.get(actif.ticker_isin) %}
+                            {% set signal = trading_signals[actif.ticker_isin] %}
+                            <div onclick="event.stopPropagation(); openAnalysisModal('{{ actif.ticker_isin }}', {{ signal|tojson|safe }})"
+                                 style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 6px; font-size: 0.85rem; cursor: pointer; transition: all 0.2s;"
+                                 onmouseover="this.style.background='#e9ecef'; this.style.transform='translateY(-2px)'"
+                                 onmouseout="this.style.background='#f8f9fa'; this.style.transform='translateY(0)'">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; color: #555;">
+                                    <div><b>Score Technique:</b> {{ "%.0f"|format(signal.technical_score) }}/100</div>
+                                    <div><b>RSI(14):</b> {{ "%.1f"|format(signal.rsi_14) if signal.rsi_14 else 'N/A' }}</div>
+                                    <div><b>SMA-20:</b> {{ "%.2f"|format(signal.sma_20) if signal.sma_20 else 'N/A' }}</div>
+                                    <div><b>SMA-50:</b> {{ "%.2f"|format(signal.sma_50) if signal.sma_50 else 'N/A' }}</div>
+                                </div>
+                                <div style="margin-top: 5px; font-size: 0.75rem; color: #888; display: flex; justify-content: space-between; align-items: center;">
+                                    <span>Dernière analyse: {{ signal.last_updated }}</span>
+                                    <span style="color: #667eea; font-weight: 600;">🔍 Voir l'analyse complète</span>
+                                </div>
+                            </div>
+                        {% endif %}
+
                         <div style="margin-top: 8px;">
                             <button class="btn btn-small" onclick="event.stopPropagation(); editActif({{ actif.id }}, '{{ actif.nom_actif|replace("'", "\\'") }}', {{ actif.prix_achat }}, {{ actif.quantite }}, {{ actif.frais }}, {{ actif.prix_actuel }}, '{{ actif.date_achat or '' }}', '{{ actif_devise }}')">📝</button>
                             <a href="{{ url_for('delete_actif', actif_id=actif.id) }}" onclick="event.stopPropagation(); return confirm('Supprimer ce titre ?')"><button class="btn btn-small" style="background: #dc3545;">🗑️</button></a>
@@ -251,6 +322,100 @@
                 </div>
                 <button type="submit" class="btn" style="background: #28a745;">Sauvegarder</button>
             </form>
+        </div>
+    </div>
+
+    <!-- Modal d'analyse technique détaillée -->
+    <div id="analysisModal" class="analysis-modal">
+        <div class="analysis-modal-content">
+            <div class="analysis-header">
+                <div>
+                    <h2 style="margin: 0; color: #333;" id="analysis-title"></h2>
+                    <p style="margin: 5px 0 0; color: #666; font-size: 0.9rem;" id="analysis-ticker"></p>
+                </div>
+                <span class="close" onclick="closeAnalysisModal()" style="font-size: 36px; color: #999;">&times;</span>
+            </div>
+            <div class="analysis-body">
+                <!-- Signal principal -->
+                <div style="text-align: center; margin-bottom: 25px;">
+                    <div style="color: #666; font-size: 0.9rem; margin-bottom: 8px;">Signal de Trading</div>
+                    <span id="analysis-signal-badge" class="signal-badge-large"></span>
+                </div>
+
+                <!-- Score technique global -->
+                <div style="margin-bottom: 25px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="font-weight: bold; color: #333;">Score Technique Global</span>
+                        <span id="analysis-score-text" style="font-weight: bold; font-size: 1.2rem;"></span>
+                    </div>
+                    <div class="score-bar">
+                        <div id="analysis-score-bar" class="score-fill"></div>
+                        <div class="score-text" id="analysis-score-value"></div>
+                    </div>
+                </div>
+
+                <!-- Indicateurs techniques -->
+                <h3 style="margin-bottom: 15px; color: #333;">📊 Indicateurs Techniques</h3>
+                <div class="indicator-grid">
+                    <div class="indicator-card">
+                        <div class="indicator-label">RSI (14)</div>
+                        <div class="indicator-value" id="analysis-rsi"></div>
+                        <div style="font-size: 0.8rem; color: #888; margin-top: 5px;" id="analysis-rsi-status"></div>
+                    </div>
+                    <div class="indicator-card">
+                        <div class="indicator-label">Cours Actuel</div>
+                        <div class="indicator-value" id="analysis-price"></div>
+                        <div style="font-size: 0.8rem; color: #888; margin-top: 5px;" id="analysis-price-change"></div>
+                    </div>
+                    <div class="indicator-card" style="border-left-color: #28a745;">
+                        <div class="indicator-label">SMA-20</div>
+                        <div class="indicator-value" id="analysis-sma20"></div>
+                    </div>
+                    <div class="indicator-card" style="border-left-color: #ffc107;">
+                        <div class="indicator-label">SMA-50</div>
+                        <div class="indicator-value" id="analysis-sma50"></div>
+                    </div>
+                    <div class="indicator-card" style="border-left-color: #17a2b8;">
+                        <div class="indicator-label">EMA-12</div>
+                        <div class="indicator-value" id="analysis-ema12"></div>
+                    </div>
+                    <div class="indicator-card" style="border-left-color: #6f42c1;">
+                        <div class="indicator-label">EMA-26</div>
+                        <div class="indicator-value" id="analysis-ema26"></div>
+                    </div>
+                </div>
+
+                <!-- Bandes de Bollinger -->
+                <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 10px;">
+                    <h4 style="margin: 0 0 10px 0; color: #333;">Bandes de Bollinger</h4>
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; font-size: 0.9rem;">
+                        <div><b>Supérieure:</b> <span id="analysis-bb-upper"></span></div>
+                        <div><b>Moyenne:</b> <span id="analysis-bb-middle"></span></div>
+                        <div><b>Inférieure:</b> <span id="analysis-bb-lower"></span></div>
+                    </div>
+                </div>
+
+                <!-- MACD -->
+                <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 10px;">
+                    <h4 style="margin: 0 0 10px 0; color: #333;">MACD</h4>
+                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 0.9rem;">
+                        <div><b>MACD:</b> <span id="analysis-macd"></span></div>
+                        <div><b>Signal:</b> <span id="analysis-macd-signal"></span></div>
+                    </div>
+                    <div style="margin-top: 8px; font-size: 0.85rem; color: #666;" id="analysis-macd-status"></div>
+                </div>
+
+                <!-- Pronostic -->
+                <div class="prognosis-box">
+                    <div class="prognosis-title">🔮 Pronostic & Recommandation</div>
+                    <div class="prognosis-text" id="analysis-prognosis"></div>
+                </div>
+
+                <!-- Dernière mise à jour -->
+                <div style="margin-top: 15px; text-align: center; font-size: 0.8rem; color: #999;">
+                    Dernière analyse: <span id="analysis-last-updated"></span>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -369,7 +534,50 @@
                     console.error(err);
                 });
         }
-        
+
+        function updateTradingSignals(event) {
+            console.log('updateTradingSignals called', event);
+            if (!confirm('Lancer l\'analyse technique de votre portefeuille ? (peut prendre 1-2 minutes)')) {
+                console.log('User cancelled');
+                return;
+            }
+
+            console.log('Starting analysis...');
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Analyse en cours...';
+
+            console.log('Fetching /api/update_trading_signals');
+            fetch('/api/update_trading_signals')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('✅ ' + data.message);
+                        // Polling toutes les 5s pour détecter fin d'analyse
+                        const interval = setInterval(() => {
+                            fetch('/api/check_trading_status')
+                                .then(r => r.json())
+                                .then(status => {
+                                    if (status.count > 0) {
+                                        clearInterval(interval);
+                                        location.reload();
+                                    }
+                                });
+                        }, 5000);
+                    } else {
+                        alert('Erreur: ' + (data.error || 'Inconnu'));
+                        btn.disabled = false;
+                        btn.innerHTML = '📊 Analyse Technique';
+                    }
+                })
+                .catch(err => {
+                    console.error('Erreur complète:', err);
+                    alert('Erreur réseau: ' + err.message);
+                    btn.disabled = false;
+                    btn.innerHTML = '📊 Analyse Technique';
+                });
+        }
+
         function openConseil() {
             window.location.href = '/conseil-du-jour';
         }
@@ -384,6 +592,153 @@
         window.onclick = function(event) {
             const modal = document.getElementById('editModal');
             if (event.target == modal) closeModal();
+
+            const analysisModal = document.getElementById('analysisModal');
+            if (event.target == analysisModal) closeAnalysisModal();
+        }
+
+        // Fonction pour ouvrir la modale d'analyse technique
+        function openAnalysisModal(ticker, signalData) {
+            console.log('Opening analysis modal for', ticker, signalData);
+
+            // Titre et ticker
+            document.getElementById('analysis-title').textContent = signalData.name || ticker;
+            document.getElementById('analysis-ticker').textContent = ticker;
+
+            // Signal principal
+            const signalBadge = document.getElementById('analysis-signal-badge');
+            signalBadge.textContent = signalData.signal_strength || signalData.signal || 'N/A';
+            signalBadge.className = 'signal-badge-large ' + (signalData.signal_class || '');
+
+            // Score technique
+            const score = signalData.technical_score || 0;
+            document.getElementById('analysis-score-text').textContent = score.toFixed(0) + '/100';
+            document.getElementById('analysis-score-bar').style.width = score + '%';
+            document.getElementById('analysis-score-value').textContent = score.toFixed(0) + '/100';
+
+            // RSI
+            const rsi = signalData.rsi_14;
+            document.getElementById('analysis-rsi').textContent = rsi ? rsi.toFixed(1) : 'N/A';
+            if (rsi) {
+                let rsiStatus = '';
+                if (rsi < 30) rsiStatus = '🟢 Survendu - Signal d\'achat';
+                else if (rsi < 40) rsiStatus = '🟢 Zone d\'achat';
+                else if (rsi < 60) rsiStatus = '🟡 Zone neutre';
+                else if (rsi < 70) rsiStatus = '🔴 Zone de vente';
+                else rsiStatus = '🔴 Suracheté - Signal de vente';
+                document.getElementById('analysis-rsi-status').textContent = rsiStatus;
+            }
+
+            // Prix
+            const currentPrice = signalData.current_price;
+            const prevClose = signalData.previous_close;
+            document.getElementById('analysis-price').textContent = currentPrice ? currentPrice.toFixed(2) + '€' : 'N/A';
+            if (currentPrice && prevClose) {
+                const change = ((currentPrice - prevClose) / prevClose * 100);
+                const changeText = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+                document.getElementById('analysis-price-change').textContent = changeText;
+                document.getElementById('analysis-price-change').style.color = change >= 0 ? '#28a745' : '#dc3545';
+            }
+
+            // Moyennes mobiles
+            document.getElementById('analysis-sma20').textContent = signalData.sma_20 ? signalData.sma_20.toFixed(2) + '€' : 'N/A';
+            document.getElementById('analysis-sma50').textContent = signalData.sma_50 ? signalData.sma_50.toFixed(2) + '€' : 'N/A';
+            document.getElementById('analysis-ema12').textContent = signalData.ema_12 ? signalData.ema_12.toFixed(2) + '€' : 'N/A';
+            document.getElementById('analysis-ema26').textContent = signalData.ema_26 ? signalData.ema_26.toFixed(2) + '€' : 'N/A';
+
+            // Bollinger Bands
+            document.getElementById('analysis-bb-upper').textContent = signalData.bbands_upper ? signalData.bbands_upper.toFixed(2) + '€' : 'N/A';
+            document.getElementById('analysis-bb-middle').textContent = signalData.bbands_middle ? signalData.bbands_middle.toFixed(2) + '€' : 'N/A';
+            document.getElementById('analysis-bb-lower').textContent = signalData.bbands_lower ? signalData.bbands_lower.toFixed(2) + '€' : 'N/A';
+
+            // MACD
+            document.getElementById('analysis-macd').textContent = signalData.macd ? signalData.macd.toFixed(3) : 'N/A';
+            document.getElementById('analysis-macd-signal').textContent = signalData.macd_signal ? signalData.macd_signal.toFixed(3) : 'N/A';
+            if (signalData.macd && signalData.macd_signal) {
+                const macdStatus = signalData.macd > signalData.macd_signal
+                    ? '🟢 MACD au-dessus du signal - Tendance haussière'
+                    : '🔴 MACD en-dessous du signal - Tendance baissière';
+                document.getElementById('analysis-macd-status').textContent = macdStatus;
+            }
+
+            // Générer le pronostic
+            const prognosis = generatePrognosis(signalData);
+            document.getElementById('analysis-prognosis').innerHTML = prognosis;
+
+            // Dernière mise à jour
+            document.getElementById('analysis-last-updated').textContent = signalData.last_updated || 'N/A';
+
+            // Afficher la modale
+            document.getElementById('analysisModal').style.display = 'block';
+        }
+
+        function closeAnalysisModal() {
+            document.getElementById('analysisModal').style.display = 'none';
+        }
+
+        function generatePrognosis(data) {
+            const score = data.technical_score || 0;
+            const signal = data.signal || '';
+            const rsi = data.rsi_14;
+            const currentPrice = data.current_price;
+            const sma20 = data.sma_20;
+            const sma50 = data.sma_50;
+
+            let prognosis = '';
+
+            // Recommandation principale
+            if (score >= 70) {
+                prognosis += '<p><b>✅ Signal d\'ACHAT FORT</b> - Les indicateurs techniques sont très favorables. C\'est un bon moment pour entrer en position ou renforcer votre position existante.</p>';
+            } else if (score >= 55) {
+                prognosis += '<p><b>✅ Signal d\'ACHAT</b> - Les indicateurs techniques sont favorables. Envisagez d\'acheter si votre analyse fondamentale le confirme.</p>';
+            } else if (score >= 45) {
+                prognosis += '<p><b>⚠️ Signal NEUTRE</b> - Les indicateurs techniques sont mixtes. Attendez une confirmation avant de prendre position.</p>';
+            } else if (score >= 30) {
+                prognosis += '<p><b>🔴 Signal de VENTE</b> - Les indicateurs techniques sont défavorables. Envisagez de réduire votre exposition.</p>';
+            } else {
+                prognosis += '<p><b>🔴 Signal de VENTE FORT</b> - Les indicateurs techniques sont très défavorables. Prudence recommandée.</p>';
+            }
+
+            // Analyse RSI
+            if (rsi) {
+                prognosis += '<p><b>RSI:</b> ';
+                if (rsi < 30) {
+                    prognosis += 'Le titre est en zone de survente (' + rsi.toFixed(1) + '). Un rebond technique est possible à court terme.';
+                } else if (rsi > 70) {
+                    prognosis += 'Le titre est en zone de surachat (' + rsi.toFixed(1) + '). Une consolidation ou correction est envisageable.';
+                } else {
+                    prognosis += 'Le RSI est dans une zone équilibrée (' + rsi.toFixed(1) + '), sans excès haussier ou baissier.';
+                }
+                prognosis += '</p>';
+            }
+
+            // Analyse moyennes mobiles
+            if (currentPrice && sma20 && sma50) {
+                prognosis += '<p><b>Tendance:</b> ';
+                if (currentPrice > sma20 && sma20 > sma50) {
+                    prognosis += 'Tendance haussière claire. Le prix est au-dessus de la SMA-20 (' + sma20.toFixed(2) + '€) qui elle-même est au-dessus de la SMA-50 (' + sma50.toFixed(2) + '€).';
+                } else if (currentPrice < sma20 && sma20 < sma50) {
+                    prognosis += 'Tendance baissière. Le prix est en-dessous de la SMA-20 (' + sma20.toFixed(2) + '€) qui elle-même est en-dessous de la SMA-50 (' + sma50.toFixed(2) + '€).';
+                } else if (sma20 > sma50) {
+                    prognosis += 'Tendance haussière de moyen terme (SMA-20 > SMA-50), mais le prix actuel montre une consolidation.';
+                } else {
+                    prognosis += 'Configuration mixte. Attendez une clarification de la tendance.';
+                }
+                prognosis += '</p>';
+            }
+
+            // Conseil final
+            prognosis += '<p style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.3);"><b>💡 Conseil:</b> ';
+            if (score >= 60) {
+                prognosis += 'Les conditions techniques sont favorables. Considérez cette analyse comme un élément parmi d\'autres dans votre décision d\'investissement.';
+            } else if (score >= 40) {
+                prognosis += 'Restez attentif à l\'évolution des indicateurs. Une confirmation est recommandée avant toute action.';
+            } else {
+                prognosis += 'Soyez prudent. Surveillez l\'évolution des indicateurs avant toute décision d\'investissement.';
+            }
+            prognosis += '</p>';
+
+            return prognosis;
         }
     </script>
 </body>
