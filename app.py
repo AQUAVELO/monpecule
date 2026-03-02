@@ -221,7 +221,35 @@ def init_db():
             c.execute("ALTER TABLE etf_analysis ADD COLUMN day_change_pct REAL")
             c.execute("ALTER TABLE etf_analysis ADD COLUMN trend_15d_pct REAL")
         except: pass
-            
+
+        # Table trading_signals (cache pour l'analyse technique)
+        c.execute('''CREATE TABLE IF NOT EXISTS trading_signals
+                     (ticker TEXT PRIMARY KEY,
+                      name TEXT,
+                      rsi_14 REAL,
+                      sma_20 REAL,
+                      sma_50 REAL,
+                      ema_12 REAL,
+                      ema_26 REAL,
+                      bb_upper REAL,
+                      bb_middle REAL,
+                      bb_lower REAL,
+                      macd REAL,
+                      macd_signal REAL,
+                      current_price REAL,
+                      previous_close REAL,
+                      technical_score REAL,
+                      signal TEXT,
+                      signal_class TEXT,
+                      signal_strength TEXT,
+                      rsi_score REAL,
+                      ma_score REAL,
+                      bb_score REAL,
+                      macd_score REAL,
+                      last_updated TEXT,
+                      devise TEXT,
+                      data_points INTEGER)''')
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -758,10 +786,19 @@ def dashboard():
     try:
         conn = get_connection()
         comptes = conn.execute('SELECT * FROM comptes WHERE user_id = ?', (session['user_id'],)).fetchall()
-        actifs = conn.execute('''SELECT a.*, c.nom_compte FROM actifs a 
-                                JOIN comptes c ON a.compte_id = c.id 
+        actifs = conn.execute('''SELECT a.*, c.nom_compte FROM actifs a
+                                JOIN comptes c ON a.compte_id = c.id
                                 WHERE c.user_id = ?''', (session['user_id'],)).fetchall()
-        
+
+        # Fetch trading signals for user's assets
+        trading_signals = {}
+        try:
+            signals_data = conn.execute('SELECT * FROM trading_signals').fetchall()
+            for sig in signals_data:
+                trading_signals[sig['ticker']] = dict(sig)
+        except:
+            pass  # Table might not exist yet
+
         user_info = conn.execute('SELECT derniere_maj, devise FROM users WHERE id = ?', 
                                    (session['user_id'],)).fetchone()
         derniere_maj = user_info['derniere_maj'] if user_info and user_info['derniere_maj'] else 'Jamais'
@@ -858,13 +895,15 @@ def dashboard():
         conn.close()
         
         return render_template('dashboard.html', comptes=comptes, actifs=actifs,
+                              trading_signals=trading_signals,
                               user_nom=session.get('user_nom'), total_pv=total_pv,
                               total_achat=total_achat, total_actuel=total_actuel,
                               total_day_pv=total_day_pv, total_month_pv=total_month_pv,
                               derniere_maj=derniere_maj,
                               comptes_stats=comptes_stats,
                               top_gainer=top_gainer, top_loser=top_loser,
-                              user_devise=user_devise, currency_symbol=currency_symbol)
+                              user_devise=user_devise, currency_symbol=currency_symbol,
+                              cron_token=CRON_TOKEN)
     except Exception as e:
         return f"Erreur Dashboard: {e}"
 
@@ -965,6 +1004,334 @@ conseil_cache = {
 }
 
 import concurrent.futures
+
+# =============================================================================
+# TECHNICAL ANALYSIS ENGINE - Trading Signals
+# =============================================================================
+
+def calculate_rsi(prices, period=14):
+    """
+    Calculate Relative Strength Index
+    RSI = 100 - (100 / (1 + RS))
+    RS = Average Gain / Average Loss
+    """
+    if len(prices) < period + 1:
+        return None
+
+    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    # Wilders smoothing
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi, 2)
+
+def calculate_sma(prices, period):
+    """Calculate Simple Moving Average"""
+    if len(prices) < period:
+        return None
+    return round(sum(prices[-period:]) / period, 4)
+
+def calculate_ema(prices, period):
+    """
+    Calculate Exponential Moving Average
+    EMA = Price(t) × k + EMA(y) × (1 − k)
+    k = 2 / (N + 1)
+    """
+    if len(prices) < period:
+        return None
+
+    k = 2 / (period + 1)
+    ema = sum(prices[:period]) / period  # Start with SMA
+
+    for price in prices[period:]:
+        ema = (price * k) + (ema * (1 - k))
+
+    return round(ema, 4)
+
+def calculate_bollinger_bands(prices, period=20, std_dev=2):
+    """
+    Calculate Bollinger Bands
+    Middle Band = SMA(20)
+    Upper Band = SMA(20) + (StdDev(20) × 2)
+    Lower Band = SMA(20) - (StdDev(20) × 2)
+    """
+    if len(prices) < period:
+        return None, None, None
+
+    recent_prices = prices[-period:]
+    middle = sum(recent_prices) / period
+
+    variance = sum((p - middle) ** 2 for p in recent_prices) / period
+    std = variance ** 0.5
+
+    upper = middle + (std * std_dev)
+    lower = middle - (std * std_dev)
+
+    return round(upper, 4), round(middle, 4), round(lower, 4)
+
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    """
+    Calculate MACD (Moving Average Convergence Divergence)
+    MACD Line = EMA(12) - EMA(26)
+    Signal Line = EMA(9) of MACD Line
+    """
+    if len(prices) < slow:
+        return None, None
+
+    ema_fast = calculate_ema(prices, fast)
+    ema_slow = calculate_ema(prices, slow)
+
+    if ema_fast is None or ema_slow is None:
+        return None, None
+
+    macd_line = ema_fast - ema_slow
+
+    # Approximation simplifiée pour la signal line
+    # En production, il faudrait calculer l'EMA des valeurs MACD historiques
+    signal_line = macd_line * 0.9
+
+    return round(macd_line, 4), round(signal_line, 4)
+
+def fetch_historical_data_technical(ticker, days=70):
+    """
+    Fetch historical OHLC data from EODHD API
+    Returns list of closing prices (oldest to newest)
+    """
+    try:
+        from datetime import timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        hist_url = f"https://eodhd.com/api/eod/{ticker}"
+        params = {
+            "from": start_date.strftime("%Y-%m-%d"),
+            "to": end_date.strftime("%Y-%m-%d"),
+            "api_token": EODHD_API_KEY,
+            "fmt": "json"
+        }
+
+        resp = requests.get(hist_url, params=params, timeout=10)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                prices = [float(candle['close']) for candle in data]
+                return prices
+
+        return None
+    except Exception as e:
+        print(f"Error fetching historical data for {ticker}: {e}")
+        return None
+
+def calculate_technical_score(rsi, current_price, sma_20, sma_50, ema_12, ema_26,
+                               bb_upper, bb_middle, bb_lower, macd, macd_signal):
+    """
+    Calculate weighted technical score (0-100)
+
+    Weights:
+    - RSI: 30%
+    - Moving Averages: 35%
+    - Bollinger Bands: 20%
+    - MACD: 15%
+    """
+    scores = {}
+
+    # 1. RSI Score (30 points max)
+    # Oversold (<30) = Strong Buy, Overbought (>70) = Strong Sell
+    if rsi is not None:
+        if rsi <= 30:
+            scores['rsi'] = 30  # Strong buy signal
+        elif rsi <= 40:
+            scores['rsi'] = 25  # Buy signal
+        elif rsi <= 60:
+            scores['rsi'] = 15  # Neutral
+        elif rsi <= 70:
+            scores['rsi'] = 5   # Sell signal
+        else:
+            scores['rsi'] = 0   # Strong sell signal
+    else:
+        scores['rsi'] = 15  # Neutral if no data
+
+    # 2. Moving Average Score (35 points max)
+    # Golden Cross (short > long) = Bullish
+    # Death Cross (short < long) = Bearish
+    ma_score = 0
+    if sma_20 and sma_50 and ema_12 and ema_26 and current_price:
+        # SMA crossover (15 points)
+        if sma_20 > sma_50:
+            ma_score += 15  # Bullish
+        elif sma_20 < sma_50:
+            ma_score += 0   # Bearish
+        else:
+            ma_score += 7.5  # Neutral
+
+        # Price vs SMA-20 (10 points)
+        if current_price > sma_20:
+            ma_score += 10  # Above SMA = Bullish
+        elif current_price < sma_20:
+            ma_score += 0   # Below SMA = Bearish
+        else:
+            ma_score += 5
+
+        # EMA crossover (10 points)
+        if ema_12 > ema_26:
+            ma_score += 10  # Bullish
+        elif ema_12 < ema_26:
+            ma_score += 0   # Bearish
+        else:
+            ma_score += 5
+    else:
+        ma_score = 17.5  # Neutral if no data
+
+    scores['ma'] = ma_score
+
+    # 3. Bollinger Bands Score (20 points max)
+    # Near lower band = Oversold (Buy)
+    # Near upper band = Overbought (Sell)
+    if bb_upper and bb_middle and bb_lower and current_price:
+        bb_range = bb_upper - bb_lower
+        if bb_range > 0:
+            position = (current_price - bb_lower) / bb_range
+
+            if position <= 0.2:
+                scores['bb'] = 20  # Near lower band = Strong buy
+            elif position <= 0.4:
+                scores['bb'] = 15  # Below middle = Buy
+            elif position <= 0.6:
+                scores['bb'] = 10  # Around middle = Neutral
+            elif position <= 0.8:
+                scores['bb'] = 5   # Above middle = Sell
+            else:
+                scores['bb'] = 0   # Near upper band = Strong sell
+        else:
+            scores['bb'] = 10  # Neutral
+    else:
+        scores['bb'] = 10  # Neutral if no data
+
+    # 4. MACD Score (15 points max)
+    # MACD > Signal = Bullish
+    # MACD < Signal = Bearish
+    if macd is not None and macd_signal is not None:
+        diff = macd - macd_signal
+
+        if diff > 0.5:
+            scores['macd'] = 15  # Strong bullish divergence
+        elif diff > 0:
+            scores['macd'] = 12  # Bullish
+        elif diff > -0.5:
+            scores['macd'] = 3   # Bearish
+        else:
+            scores['macd'] = 0   # Strong bearish divergence
+    else:
+        scores['macd'] = 7.5  # Neutral if no data
+
+    # Total score
+    total_score = sum(scores.values())
+
+    return round(total_score, 2), scores
+
+def generate_signal_from_score(score):
+    """
+    Convert technical score to signal strength and display
+    """
+    if score >= 80:
+        return "🟢 ACHAT FORT", "signal-achat", "ACHAT FORT"
+    elif score >= 60:
+        return "🟢 ACHAT", "signal-achat", "ACHAT"
+    elif score >= 40:
+        return "🟡 NEUTRE", "signal-neutre", "NEUTRE"
+    elif score >= 20:
+        return "🔴 VENTE", "signal-vente", "VENTE"
+    else:
+        return "🔴 VENTE FORTE", "signal-vente", "VENTE FORTE"
+
+def analyze_ticker_technical(ticker, api_key, ticker_names):
+    """
+    Analyze a single ticker with technical indicators
+    Executed in parallel via ThreadPoolExecutor
+    """
+    try:
+        # Normalize ticker
+        search_ticker = ticker
+        if '.' not in search_ticker and not search_ticker.isdigit():
+            search_ticker = f"{search_ticker}.PA"
+
+        name = ticker_names.get(ticker, ticker)
+
+        # 1. Fetch historical data (70 days for 50-period indicators + buffer)
+        prices = fetch_historical_data_technical(search_ticker, days=70)
+
+        if not prices or len(prices) < 20:
+            print(f"Insufficient data for {ticker}: {len(prices) if prices else 0} days")
+            return None
+
+        print(f"✓ Analyzing {ticker} with {len(prices)} days of data")
+        current_price = prices[-1]
+        previous_close = prices[-2] if len(prices) > 1 else current_price
+
+        # 2. Calculate technical indicators
+        rsi_14 = calculate_rsi(prices, 14)
+        sma_20 = calculate_sma(prices, 20)
+        sma_50 = calculate_sma(prices, 50)
+        ema_12 = calculate_ema(prices, 12)
+        ema_26 = calculate_ema(prices, 26)
+        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(prices, 20, 2)
+        macd, macd_signal = calculate_macd(prices, 12, 26, 9)
+
+        # 3. Calculate weighted score
+        technical_score, component_scores = calculate_technical_score(
+            rsi_14, current_price, sma_20, sma_50, ema_12, ema_26,
+            bb_upper, bb_middle, bb_lower, macd, macd_signal
+        )
+
+        # 4. Generate signal
+        signal, signal_class, signal_strength = generate_signal_from_score(technical_score)
+
+        # 5. Detect currency
+        devise = detect_currency_from_symbol(search_ticker)
+
+        return {
+            'ticker': ticker,
+            'name': name,
+            'rsi_14': rsi_14,
+            'sma_20': sma_20,
+            'sma_50': sma_50,
+            'ema_12': ema_12,
+            'ema_26': ema_26,
+            'bb_upper': bb_upper,
+            'bb_middle': bb_middle,
+            'bb_lower': bb_lower,
+            'macd': macd,
+            'macd_signal': macd_signal,
+            'current_price': current_price,
+            'previous_close': previous_close,
+            'technical_score': technical_score,
+            'signal': signal,
+            'signal_class': signal_class,
+            'signal_strength': signal_strength,
+            'rsi_score': component_scores['rsi'],
+            'ma_score': component_scores['ma'],
+            'bb_score': component_scores['bb'],
+            'macd_score': component_scores['macd'],
+            'devise': devise,
+            'data_points': len(prices)
+        }
+
+    except Exception as e:
+        print(f"Error analyzing {ticker}: {e}")
+        return None
 
 def analyze_ticker(ticker, api_key, base_url, realtime_url, ticker_names):
     """Analyse un seul ticker (exécuté en parallèle)"""
@@ -1269,6 +1636,107 @@ def check_analysis_status():
     
     # On renvoie le nombre de résultats et la date de dernière mise à jour
     # Le frontend pourra décider de rafraîchir la page si count > 0 et que c'était 0 avant
+    return jsonify({'count': count, 'last_updated': last_updated})
+
+@app.route('/api/update_trading_signals')
+def update_trading_signals():
+    """
+    Background analysis of user's assets with technical indicators
+    Requires user session OR CRON token authentication
+    """
+    # Allow if user is logged in OR if valid CRON token is provided
+    if 'user_id' not in session and request.args.get('token') != CRON_TOKEN:
+        return jsonify({'error': 'Non autorisé'}), 401
+
+    def run_update():
+        conn = get_connection()
+
+        # Get all unique tickers from user's portfolio
+        user_tickers = set()
+        user_actifs = conn.execute(
+            'SELECT DISTINCT ticker_isin, nom_actif FROM actifs WHERE ticker_isin != ""'
+        ).fetchall()
+
+        ticker_names = {}
+        for actif in user_actifs:
+            t = actif['ticker_isin'].upper()
+            user_tickers.add(t)
+            ticker_names[t] = actif['nom_actif']
+
+        if not user_tickers:
+            print("No tickers to analyze")
+            conn.close()
+            return
+
+        print(f"Starting technical analysis for {len(user_tickers)} tickers")
+
+        # Parallel execution with 10 workers (EODHD can handle moderate concurrency)
+        results_to_save = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_ticker = {
+                executor.submit(analyze_ticker_technical, t, EODHD_API_KEY, ticker_names): t
+                for t in user_tickers
+            }
+
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                try:
+                    res = future.result()
+                    if res:
+                        results_to_save.append(res)
+                except Exception as e:
+                    print(f"Future error: {e}")
+
+        # Save to database
+        now = datetime.now().strftime('%d/%m/%Y à %H:%M')
+        conn.execute('DELETE FROM trading_signals')
+
+        for r in results_to_save:
+            conn.execute('''INSERT INTO trading_signals
+                           (ticker, name, rsi_14, sma_20, sma_50, ema_12, ema_26,
+                            bb_upper, bb_middle, bb_lower, macd, macd_signal,
+                            current_price, previous_close, technical_score,
+                            signal, signal_class, signal_strength,
+                            rsi_score, ma_score, bb_score, macd_score,
+                            last_updated, devise, data_points)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (r['ticker'], r['name'], r['rsi_14'], r['sma_20'], r['sma_50'],
+                         r['ema_12'], r['ema_26'], r['bb_upper'], r['bb_middle'], r['bb_lower'],
+                         r['macd'], r['macd_signal'], r['current_price'], r['previous_close'],
+                         r['technical_score'], r['signal'], r['signal_class'], r['signal_strength'],
+                         r['rsi_score'], r['ma_score'], r['bb_score'], r['macd_score'],
+                         now, r['devise'], r['data_points']))
+
+        conn.commit()
+        conn.close()
+        print(f"Technical analysis completed: {len(results_to_save)} tickers saved")
+
+    # Launch in background thread
+    thread = threading.Thread(target=run_update)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': 'Analyse technique lancée. Rafraîchissez dans quelques minutes.'
+    })
+
+@app.route('/api/check_trading_status')
+def check_trading_status():
+    """Check if trading signals data is available"""
+    if 'user_id' not in session:
+        return jsonify({'error': 'Non autorisé'}), 401
+
+    conn = get_connection()
+    count = conn.execute('SELECT COUNT(*) as cnt FROM trading_signals').fetchone()['cnt']
+    last_updated = "Jamais"
+
+    if count > 0:
+        row = conn.execute('SELECT last_updated FROM trading_signals LIMIT 1').fetchone()
+        if row:
+            last_updated = row['last_updated']
+
+    conn.close()
+
     return jsonify({'count': count, 'last_updated': last_updated})
 
 @app.route('/debug_stellantis')

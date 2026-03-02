@@ -203,7 +203,7 @@
                                 {{ actif.ticker_isin }} <span style="margin-left: 8px; background: #e9ecef; padding: 2px 6px; border-radius: 4px;">x{{ actif.quantite }}</span>
                                 <a href="https://fr.finance.yahoo.com/quote/{{ actif.ticker_isin }}" target="_blank" style="margin-left: 8px; color: #17a2b8; text-decoration: none; font-size: 0.75rem;" title="Voir sur Yahoo Finance">📈 Yahoo</a>
 
-                                {% if trading_signals.get(actif.ticker_isin) %}
+                                {% if trading_signals is defined and trading_signals.get(actif.ticker_isin) %}
                                     {% set signal = trading_signals[actif.ticker_isin] %}
                                     <span class="{{ signal.signal_class }} signal-button"
                                           style="margin-left: 8px; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;"
@@ -234,7 +234,7 @@
                             <b>Variation Jour:</b> <span class="{% if day_pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">{{ "%.0f"|format(day_pv) }}{{ actif_symbol }}</span> | <span class="{% if pv >= 0 %}pv-positive{% else %}pv-negative{% endif %}">PV Totale: {{ "%.0f"|format(pv) }}{{ actif_symbol }}</span>
                         </div>
 
-                        {% if trading_signals.get(actif.ticker_isin) %}
+                        {% if trading_signals is defined and trading_signals.get(actif.ticker_isin) %}
                             {% set signal = trading_signals[actif.ticker_isin] %}
                             <div data-signal='{{ signal|tojson }}'
                                  data-ticker="{{ actif.ticker_isin }}"
