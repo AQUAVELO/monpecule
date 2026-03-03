@@ -2317,14 +2317,14 @@ def update_prices():
                 
                 p, n, pv, currency = fetch_price_from_api(row['ticker'])
                 if p is not None:
-                    # Décider du prix de veille à utiliser
-                    if is_cron_thread:
-                        # CRON : utiliser le previousClose de l'API (prix de fermeture d'hier)
+                    # Toujours utiliser le previousClose de l'API comme prix de veille
+                    # (variation depuis la clôture d'hier, cohérente CRON + manuel)
+                    if pv and float(pv) > 0:
                         nouveau_prix_veille = float(pv)
+                    elif ancien_prix > 0:
+                        nouveau_prix_veille = ancien_prix
                     else:
-                        # Mise à jour manuelle : garder l'ancien prix actuel comme référence
-                        # pour que la PV du jour reflète la variation depuis la dernière MAJ
-                        nouveau_prix_veille = ancien_prix if ancien_prix > 0 else float(pv)
+                        nouveau_prix_veille = float(p)
                     
                     pv_jour = (float(p) - nouveau_prix_veille) * quantite
                     pv_jour_eur = convert_currency(pv_jour, currency, 'EUR')
