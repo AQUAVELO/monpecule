@@ -1954,6 +1954,122 @@ def api_reset_month():
     
     return jsonify({'success': True, 'message': f'Cumul mensuel réinitialisé pour {len(actifs)} actifs'})
 
+@app.route('/api/calcul_pv_mois_historique')
+def api_calcul_pv_mois_historique():
+    """
+    Calcule la PV d'un mois passé pour tous les actifs de l'utilisateur via yfinance
+    Paramètre : mois=YYYY-MM (ex: 2026-01)
+    """
+    if 'user_id' not in session:
+        return jsonify({'error': 'Non connecté'}), 401
+
+    mois = request.args.get('mois')
+    if not mois:
+        return jsonify({'error': 'Paramètre mois requis (YYYY-MM)'}), 400
+
+    try:
+        from datetime import timedelta, date
+        annee, num_mois = int(mois.split('-')[0]), int(mois.split('-')[1])
+        # Premier jour du mois demandé
+        debut_mois = date(annee, num_mois, 1)
+        # Premier jour du mois suivant (= lendemain du dernier jour du mois)
+        if num_mois == 12:
+            debut_mois_suivant = date(annee + 1, 1, 1)
+        else:
+            debut_mois_suivant = date(annee, num_mois + 1, 1)
+        # On télécharge un peu avant pour avoir le prix de clôture du dernier jour du mois précédent
+        start_dl = debut_mois - timedelta(days=7)
+        end_dl = debut_mois_suivant + timedelta(days=1)
+    except Exception as e:
+        return jsonify({'error': f'Format de mois invalide : {e}'}), 400
+
+    conn = get_connection()
+    actifs = conn.execute('''
+        SELECT a.id, a.ticker_isin, a.nom_actif, a.quantite, a.frais, a.devise_cotation
+        FROM actifs a
+        JOIN comptes c ON a.compte_id = c.id
+        WHERE c.user_id = ? AND a.ticker_isin != ""
+    ''', (session['user_id'],)).fetchall()
+
+    resultats = []
+    erreurs = []
+
+    for actif in actifs:
+        ticker = actif['ticker_isin'].upper()
+        quantite = safe_int(actif['quantite'])
+        devise = actif['devise_cotation'] or 'EUR'
+
+        try:
+            import yfinance as yf
+            data = yf.download(ticker, start=start_dl.strftime('%Y-%m-%d'),
+                               end=end_dl.strftime('%Y-%m-%d'), progress=False, auto_adjust=True)
+
+            if data.empty:
+                erreurs.append(f"{actif['nom_actif']} ({ticker}) : pas de données")
+                continue
+
+            # Fermeture de la colonne Close
+            closes = data['Close']
+            if hasattr(closes, 'columns'):
+                closes = closes.iloc[:, 0]
+            closes = closes.dropna()
+
+            if len(closes) < 2:
+                erreurs.append(f"{actif['nom_actif']} ({ticker}) : données insuffisantes")
+                continue
+
+            # Prix de clôture du dernier jour AVANT le début du mois (= veille du 1er)
+            avant_mois = closes[closes.index < str(debut_mois)]
+            dans_mois = closes[(closes.index >= str(debut_mois)) & (closes.index < str(debut_mois_suivant))]
+
+            if avant_mois.empty or dans_mois.empty:
+                erreurs.append(f"{actif['nom_actif']} ({ticker}) : données manquantes pour {mois}")
+                continue
+
+            prix_debut = float(avant_mois.iloc[-1])   # dernier cours avant le mois
+            prix_fin = float(dans_mois.iloc[-1])       # dernier cours du mois
+
+            pv_brute = (prix_fin - prix_debut) * quantite
+            pv_eur = convert_currency(pv_brute, devise, 'EUR')
+
+            # Insérer ou remplacer dans cumul_pv_mois
+            existing = conn.execute(
+                'SELECT id FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
+                (actif['id'], mois)
+            ).fetchone()
+
+            if existing:
+                conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
+                           (round(pv_eur, 4), mois + '-recalc', existing['id']))
+            else:
+                conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
+                           (actif['id'], mois, round(pv_eur, 4), mois + '-recalc'))
+
+            resultats.append({
+                'actif': actif['nom_actif'],
+                'ticker': ticker,
+                'prix_debut': round(prix_debut, 4),
+                'prix_fin': round(prix_fin, 4),
+                'pv_eur': round(pv_eur, 2)
+            })
+
+        except Exception as e:
+            erreurs.append(f"{actif['nom_actif']} ({ticker}) : {str(e)[:80]}")
+
+    conn.commit()
+    conn.close()
+
+    total_pv = sum(r['pv_eur'] for r in resultats)
+    return jsonify({
+        'success': True,
+        'mois': mois,
+        'nb_actifs': len(resultats),
+        'total_pv_eur': round(total_pv, 2),
+        'resultats': resultats,
+        'erreurs': erreurs
+    })
+
+
 @app.route('/api/historique_pv_mois')
 def api_historique_pv_mois():
     """Retourne le cumul de PV par mois pour l'utilisateur connecté"""

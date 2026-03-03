@@ -312,7 +312,33 @@
                 </div>
                 <span onclick="document.getElementById('historiquePvModal').style.display='none'" style="color:white; font-size:1.8rem; cursor:pointer; line-height:1; opacity:0.8;">&times;</span>
             </div>
-            <div id="historiquePvContenu" style="padding:20px 24px; overflow-y:auto; flex:1;">
+            <div style="padding:16px 24px; border-bottom:1px solid #eee; background:#fafbff;">
+                <p style="font-size:0.82rem; color:#666; margin:0 0 10px;">Calculer un mois passé depuis les cours yfinance :</p>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <button data-label="Janvier 2026" onclick="calculerPvMoisHistorique('2026-01', this)"
+                        style="background:#667eea;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.82rem;font-weight:600;">
+                        Janvier
+                    </button>
+                    <button data-label="Février 2026" onclick="calculerPvMoisHistorique('2026-02', this)"
+                        style="background:#667eea;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.82rem;font-weight:600;">
+                        Février
+                    </button>
+                    <button data-label="Décembre 2025" onclick="calculerPvMoisHistorique('2025-12', this)"
+                        style="background:#adb5bd;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.82rem;">
+                        Déc. 2025
+                    </button>
+                    <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+                        <input type="month" id="mois_custom_input" style="border:1px solid #ddd;border-radius:6px;padding:5px 8px;font-size:0.82rem;">
+                        <button onclick="const v=document.getElementById('mois_custom_input').value; if(v){const b=this;b.dataset.label=v;calculerPvMoisHistorique(v,b);}"
+                            style="background:#495057;color:white;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:0.82rem;"
+                            data-label="">
+                            Calculer
+                        </button>
+                    </div>
+                </div>
+                <div id="calcul_status" style="margin-top:8px;font-size:0.82rem;min-height:18px;"></div>
+            </div>
+            <div id="historiquePvTableau" style="padding:20px 24px; overflow-y:auto; flex:1;">
                 <p style="color:#888; text-align:center;">Chargement...</p>
             </div>
         </div>
@@ -524,87 +550,124 @@
                 });
         }
         
-        async function ouvrirHistoriquePvMois() {
-            const modal = document.getElementById('historiquePvModal');
-            const contenu = document.getElementById('historiquePvContenu');
-            modal.style.display = 'block';
-            contenu.innerHTML = '<p style="color:#888; text-align:center; padding:20px;">⏳ Chargement...</p>';
+        function renderTableauHistorique(data, contenu) {
+            if (!data.success || !data.historique.length) {
+                contenu.innerHTML = `
+                    <p style="color:#888; text-align:center; padding:20px;">
+                        Aucun historique disponible.<br>
+                        <small>Utilisez les boutons ci-dessus pour calculer les mois passés.</small>
+                    </p>`;
+                return;
+            }
+            const detailParMois = {};
+            (data.detail || []).forEach(d => {
+                if (!detailParMois[d.mois]) detailParMois[d.mois] = [];
+                detailParMois[d.mois].push(d);
+            });
+            const totalGeneral = data.historique.reduce((s, r) => s + r.total_pv, 0);
+            const couleurTotal = totalGeneral >= 0 ? '#28a745' : '#dc3545';
 
+            let html = `
+                <div style="background:#f8f9fa; border-radius:10px; padding:14px 18px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:600; color:#555;">Total archivé (tous mois)</span>
+                    <span style="font-size:1.4rem; font-weight:bold; color:${couleurTotal};">${totalGeneral >= 0 ? '+' : ''}${totalGeneral.toFixed(0)} €</span>
+                </div>
+                <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+                    <thead>
+                        <tr style="background:#f1f3f5; color:#555;">
+                            <th style="padding:10px 12px; text-align:left; border-radius:6px 0 0 6px;">Mois</th>
+                            <th style="padding:10px 12px; text-align:right;">PV Cumulée</th>
+                            <th style="padding:10px 12px; text-align:center; border-radius:0 6px 6px 0;">Détail</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+
+            data.historique.forEach((row, i) => {
+                const pv = row.total_pv;
+                const couleur = pv >= 0 ? '#28a745' : '#dc3545';
+                const bg = i % 2 === 0 ? '#ffffff' : '#fafafa';
+                const detail = detailParMois[row.mois] || [];
+                const detailId = `detail_${row.mois.replace('-', '_')}`;
+                let detailHtml = '';
+                if (detail.length > 1) {
+                    detailHtml = detail.map(d => {
+                        const c = d.pv_compte >= 0 ? '#28a745' : '#dc3545';
+                        return `<div style="display:flex;justify-content:space-between;padding:4px 8px;font-size:0.82rem;color:#555;">
+                            <span>🏦 ${d.compte}</span>
+                            <span style="color:${c};font-weight:600;">${d.pv_compte >= 0 ? '+' : ''}${d.pv_compte.toFixed(0)} €</span>
+                        </div>`;
+                    }).join('');
+                }
+                html += `
+                    <tr style="background:${bg}; border-bottom:1px solid #eee;">
+                        <td style="padding:12px; font-weight:600; color:#333;">${row.label}</td>
+                        <td style="padding:12px; text-align:right; font-weight:bold; color:${couleur}; font-size:1rem;">
+                            ${pv >= 0 ? '+' : ''}${pv.toFixed(0)} €
+                        </td>
+                        <td style="padding:12px; text-align:center;">
+                            ${detail.length > 1
+                                ? `<button onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'block':'none'"
+                                    style="background:none;border:1px solid #ddd;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.75rem;color:#667eea;">▼ Comptes</button>`
+                                : '—'}
+                        </td>
+                    </tr>
+                    ${detail.length > 1 ? `<tr id="${detailId}" style="display:none;background:#f0f4ff;">
+                        <td colspan="3" style="padding:4px 12px 10px;">${detailHtml}</td>
+                    </tr>` : ''}`;
+            });
+            html += '</tbody></table>';
+            contenu.innerHTML = html;
+        }
+
+        async function chargerHistoriquePvMois() {
+            const contenu = document.getElementById('historiquePvTableau');
+            contenu.innerHTML = '<p style="color:#888;text-align:center;padding:10px;">⏳ Chargement...</p>';
             try {
                 const res = await fetch('/api/historique_pv_mois');
                 const data = await res.json();
-
-                if (!data.success || !data.historique.length) {
-                    contenu.innerHTML = '<p style="color:#888; text-align:center; padding:20px;">Aucun historique disponible.<br><small>Les cumuls s\'accumulent chaque jour via le CRON de 17h45.</small></p>';
-                    return;
-                }
-
-                // Regrouper les détails par mois
-                const detailParMois = {};
-                (data.detail || []).forEach(d => {
-                    if (!detailParMois[d.mois]) detailParMois[d.mois] = [];
-                    detailParMois[d.mois].push(d);
-                });
-
-                // Calculer le total général
-                const totalGeneral = data.historique.reduce((s, r) => s + r.total_pv, 0);
-                const couleurTotal = totalGeneral >= 0 ? '#28a745' : '#dc3545';
-
-                let html = `
-                    <div style="background:#f8f9fa; border-radius:10px; padding:14px 18px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-                        <span style="font-weight:600; color:#555;">Total archivé (tous mois)</span>
-                        <span style="font-size:1.4rem; font-weight:bold; color:${couleurTotal};">${totalGeneral >= 0 ? '+' : ''}${totalGeneral.toFixed(0)} €</span>
-                    </div>
-                    <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
-                        <thead>
-                            <tr style="background:#f1f3f5; color:#555;">
-                                <th style="padding:10px 12px; text-align:left; border-radius:6px 0 0 6px;">Mois</th>
-                                <th style="padding:10px 12px; text-align:right;">PV Cumulée</th>
-                                <th style="padding:10px 12px; text-align:center; border-radius:0 6px 6px 0;">Détail</th>
-                            </tr>
-                        </thead>
-                        <tbody>`;
-
-                data.historique.forEach((row, i) => {
-                    const pv = row.total_pv;
-                    const couleur = pv >= 0 ? '#28a745' : '#dc3545';
-                    const bg = i % 2 === 0 ? '#ffffff' : '#fafafa';
-                    const detail = detailParMois[row.mois] || [];
-                    const detailId = `detail_${row.mois.replace('-', '_')}`;
-
-                    let detailHtml = '';
-                    if (detail.length > 1) {
-                        detailHtml = detail.map(d => {
-                            const c = d.pv_compte >= 0 ? '#28a745' : '#dc3545';
-                            return `<div style="display:flex; justify-content:space-between; padding:4px 8px; font-size:0.82rem; color:#555;">
-                                        <span>🏦 ${d.compte}</span>
-                                        <span style="color:${c}; font-weight:600;">${d.pv_compte >= 0 ? '+' : ''}${d.pv_compte.toFixed(0)} €</span>
-                                    </div>`;
-                        }).join('');
-                    }
-
-                    html += `
-                        <tr style="background:${bg}; border-bottom:1px solid #eee;">
-                            <td style="padding:12px 12px; font-weight:600; color:#333;">${row.label}</td>
-                            <td style="padding:12px 12px; text-align:right; font-weight:bold; color:${couleur}; font-size:1rem;">
-                                ${pv >= 0 ? '+' : ''}${pv.toFixed(0)} €
-                            </td>
-                            <td style="padding:12px 12px; text-align:center;">
-                                ${detail.length > 1 ? `<button onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'block':'none'"
-                                    style="background:none; border:1px solid #ddd; border-radius:4px; padding:2px 8px; cursor:pointer; font-size:0.75rem; color:#667eea;">▼ Comptes</button>` : '—'}
-                            </td>
-                        </tr>
-                        ${detail.length > 1 ? `<tr id="${detailId}" style="display:none; background:#f0f4ff;">
-                            <td colspan="3" style="padding:4px 12px 10px;">${detailHtml}</td>
-                        </tr>` : ''}`;
-                });
-
-                html += '</tbody></table>';
-                contenu.innerHTML = html;
-
+                renderTableauHistorique(data, contenu);
             } catch(e) {
-                contenu.innerHTML = '<p style="color:#dc3545; text-align:center; padding:20px;">Erreur lors du chargement de l\'historique.</p>';
+                contenu.innerHTML = '<p style="color:#dc3545;text-align:center;padding:10px;">Erreur de chargement.</p>';
             }
+        }
+
+        async function calculerPvMoisHistorique(mois, btnEl) {
+            const label = btnEl.dataset.label;
+            if (!confirm(`Calculer la PV de ${label} depuis yfinance ?\n\nCela récupérera les prix de clôture du mois et calculera la variation pour chaque actif.`)) return;
+
+            btnEl.disabled = true;
+            btnEl.innerHTML = '⏳';
+            const statusEl = document.getElementById('calcul_status');
+            statusEl.innerHTML = `<span style="color:#667eea;">⏳ Calcul de ${label} en cours...</span>`;
+
+            try {
+                const res = await fetch(`/api/calcul_pv_mois_historique?mois=${mois}`);
+                const data = await res.json();
+
+                if (data.success) {
+                    const c = data.total_pv_eur >= 0 ? '#28a745' : '#dc3545';
+                    let msg = `<span style="color:${c};font-weight:600;">✅ ${label} : ${data.total_pv_eur >= 0 ? '+' : ''}${data.total_pv_eur.toFixed(0)} € (${data.nb_actifs} actifs)</span>`;
+                    if (data.erreurs.length) msg += `<br><small style="color:#888;">${data.erreurs.join(' | ')}</small>`;
+                    statusEl.innerHTML = msg;
+                    btnEl.innerHTML = '✅';
+                    btnEl.style.background = '#28a745';
+                    await chargerHistoriquePvMois();
+                } else {
+                    statusEl.innerHTML = `<span style="color:#dc3545;">❌ ${data.error}</span>`;
+                    btnEl.disabled = false;
+                    btnEl.innerHTML = label.split(' ')[0];
+                }
+            } catch(e) {
+                statusEl.innerHTML = `<span style="color:#dc3545;">❌ Erreur réseau</span>`;
+                btnEl.disabled = false;
+                btnEl.innerHTML = label.split(' ')[0];
+            }
+        }
+
+        async function ouvrirHistoriquePvMois() {
+            const modal = document.getElementById('historiquePvModal');
+            modal.style.display = 'block';
+            await chargerHistoriquePvMois();
         }
 
         async function resetEtRecalculPvMois() {
