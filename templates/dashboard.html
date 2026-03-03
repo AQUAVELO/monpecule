@@ -646,8 +646,15 @@
 
                 if (data.success) {
                     const c = data.total_pv_eur >= 0 ? '#28a745' : '#dc3545';
-                    let msg = `<span style="color:${c};font-weight:600;">✅ ${label} : ${data.total_pv_eur >= 0 ? '+' : ''}${data.total_pv_eur.toFixed(0)} € (${data.nb_actifs} actifs)</span>`;
-                    if (data.erreurs.length) msg += `<br><small style="color:#888;">${data.erreurs.join(' | ')}</small>`;
+                    let msg = `<span style="color:${c};font-weight:600;">✅ ${label} : ${data.total_pv_eur >= 0 ? '+' : ''}${data.total_pv_eur.toFixed(0)} € — ${data.nb_actifs} actifs calculés</span>`;
+                    if (data.erreurs.length) {
+                        const errId = 'err_' + Date.now();
+                        msg += ` <button onclick="document.getElementById('${errId}').style.display=document.getElementById('${errId}').style.display==='none'?'block':'none'"
+                            style="background:none;border:1px solid #aaa;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:0.75rem;color:#888;">${data.erreurs.length} erreurs ▼</button>
+                            <div id="${errId}" style="display:none;margin-top:4px;padding:6px;background:#f8f9fa;border-radius:4px;font-size:0.75rem;color:#888;line-height:1.6;">
+                            ${data.erreurs.join('<br>')}
+                            </div>`;
+                    }
                     statusEl.innerHTML = msg;
                     btnEl.innerHTML = '✅';
                     btnEl.style.background = '#28a745';

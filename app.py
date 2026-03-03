@@ -1954,10 +1954,70 @@ def api_reset_month():
     
     return jsonify({'success': True, 'message': f'Cumul mensuel réinitialisé pour {len(actifs)} actifs'})
 
+def fetch_closes_eodhd_periode(ticker_eodhd, date_from, date_to):
+    """
+    Récupère les prix de clôture EODHD entre deux dates.
+    Retourne une liste de dicts {date, close} triés par date.
+    """
+    try:
+        url = f"https://eodhd.com/api/eod/{ticker_eodhd}"
+        params = {
+            "from": date_from,
+            "to": date_to,
+            "api_token": EODHD_API_KEY,
+            "fmt": "json"
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data  # [{date, open, high, low, close, ...}, ...]
+    except Exception:
+        pass
+    return []
+
+
+def resoudre_ticker_eodhd(ticker_isin_brut):
+    """
+    Convertit un ticker_isin (ISIN, nom, ticker Yahoo) en format EODHD utilisable.
+    Stratégie :
+    1. normalize_forced_symbol → ticker Yahoo (ex: BNP.PA, TSLA)
+    2. Si le ticker Yahoo contient '.PA' → '{symbol}.PA' pour EODHD
+    3. Si pas de suffixe → essayer '.PA' puis sans suffixe (US)
+    Retourne (ticker_eodhd, devise_detectee)
+    """
+    normalise = normalize_forced_symbol(ticker_isin_brut.strip())
+    upper = normalise.upper()
+
+    # Mapping suffixe Yahoo → suffixe EODHD
+    SUFFIXES = {
+        '.PA': '.PA',    # Euronext Paris
+        '.L':  '.LSE',   # London Stock Exchange
+        '.AS': '.AS',    # Amsterdam
+        '.MI': '.MI',    # Milan
+        '.DE': '.XETRA', # Allemagne
+        '.BR': '.BR',    # Bruxelles
+    }
+
+    for yahoo_sfx, eodhd_sfx in SUFFIXES.items():
+        if upper.endswith(yahoo_sfx):
+            base = upper[:-len(yahoo_sfx)]
+            return base + eodhd_sfx, detect_currency_from_symbol(upper)
+
+    # Ticker sans suffixe (US par défaut) ou court
+    if '.' not in upper and len(upper) <= 6:
+        return upper, 'USD'
+
+    # ISIN ou nom long → on essaie de résoudre via fetch_price_from_api pour obtenir le vrai symbol
+    # Mais c'est trop lourd ici, on retourne tel quel et on laisse EODHD chercher
+    return upper, detect_currency_from_symbol(upper)
+
+
 @app.route('/api/calcul_pv_mois_historique')
 def api_calcul_pv_mois_historique():
     """
-    Calcule la PV d'un mois passé pour tous les actifs de l'utilisateur via yfinance
+    Calcule la PV d'un mois passé pour tous les actifs de l'utilisateur.
+    Utilise EODHD (comme fetch_historical_data_technical) + normalize_forced_symbol.
     Paramètre : mois=YYYY-MM (ex: 2026-01)
     """
     if 'user_id' not in session:
@@ -1970,91 +2030,95 @@ def api_calcul_pv_mois_historique():
     try:
         from datetime import timedelta, date
         annee, num_mois = int(mois.split('-')[0]), int(mois.split('-')[1])
-        # Premier jour du mois demandé
         debut_mois = date(annee, num_mois, 1)
-        # Premier jour du mois suivant (= lendemain du dernier jour du mois)
         if num_mois == 12:
             debut_mois_suivant = date(annee + 1, 1, 1)
         else:
             debut_mois_suivant = date(annee, num_mois + 1, 1)
-        # On télécharge un peu avant pour avoir le prix de clôture du dernier jour du mois précédent
-        start_dl = debut_mois - timedelta(days=7)
-        end_dl = debut_mois_suivant + timedelta(days=1)
+        # Élargir la fenêtre pour capturer le dernier jour de bourse du mois précédent
+        date_from = (debut_mois - timedelta(days=10)).strftime('%Y-%m-%d')
+        date_to   = (debut_mois_suivant + timedelta(days=3)).strftime('%Y-%m-%d')
     except Exception as e:
         return jsonify({'error': f'Format de mois invalide : {e}'}), 400
 
     conn = get_connection()
     actifs = conn.execute('''
-        SELECT a.id, a.ticker_isin, a.nom_actif, a.quantite, a.frais, a.devise_cotation
+        SELECT a.id, a.ticker_isin, a.nom_actif, a.quantite, a.devise_cotation
         FROM actifs a
         JOIN comptes c ON a.compte_id = c.id
-        WHERE c.user_id = ? AND a.ticker_isin != ""
+        WHERE c.user_id = ? AND TRIM(a.ticker_isin) != ""
     ''', (session['user_id'],)).fetchall()
 
     resultats = []
     erreurs = []
 
     for actif in actifs:
-        ticker = actif['ticker_isin'].upper()
-        quantite = safe_int(actif['quantite'])
-        devise = actif['devise_cotation'] or 'EUR'
+        ticker_brut = actif['ticker_isin'].strip()
+        quantite    = safe_int(actif['quantite'])
+        devise      = actif['devise_cotation'] or 'EUR'
+        nom         = actif['nom_actif']
 
-        try:
-            import yfinance as yf
-            data = yf.download(ticker, start=start_dl.strftime('%Y-%m-%d'),
-                               end=end_dl.strftime('%Y-%m-%d'), progress=False, auto_adjust=True)
+        ticker_eodhd, devise_auto = resoudre_ticker_eodhd(ticker_brut)
 
-            if data.empty:
-                erreurs.append(f"{actif['nom_actif']} ({ticker}) : pas de données")
-                continue
+        # Si la devise_cotation n'est pas définie, utiliser celle détectée
+        if not actif['devise_cotation']:
+            devise = devise_auto
 
-            # Fermeture de la colonne Close
-            closes = data['Close']
-            if hasattr(closes, 'columns'):
-                closes = closes.iloc[:, 0]
-            closes = closes.dropna()
+        # Tentatives EODHD : ticker résolu, puis variante .PA si pas de suffixe
+        candidats = [ticker_eodhd]
+        if '.' not in ticker_eodhd:
+            candidats.append(ticker_eodhd + '.PA')
 
-            if len(closes) < 2:
-                erreurs.append(f"{actif['nom_actif']} ({ticker}) : données insuffisantes")
-                continue
+        closes = []
+        ticker_ok = None
+        for cand in candidats:
+            raw = fetch_closes_eodhd_periode(cand, date_from, date_to)
+            if raw:
+                closes = raw
+                ticker_ok = cand
+                break
 
-            # Prix de clôture du dernier jour AVANT le début du mois (= veille du 1er)
-            avant_mois = closes[closes.index < str(debut_mois)]
-            dans_mois = closes[(closes.index >= str(debut_mois)) & (closes.index < str(debut_mois_suivant))]
+        if not closes:
+            erreurs.append(f"{nom} ({ticker_brut}→{ticker_eodhd}) : pas de données EODHD")
+            continue
 
-            if avant_mois.empty or dans_mois.empty:
-                erreurs.append(f"{actif['nom_actif']} ({ticker}) : données manquantes pour {mois}")
-                continue
+        # Trier par date
+        closes.sort(key=lambda x: x['date'])
 
-            prix_debut = float(avant_mois.iloc[-1])   # dernier cours avant le mois
-            prix_fin = float(dans_mois.iloc[-1])       # dernier cours du mois
+        # Prix avant le mois (dernier jour de bourse du mois précédent)
+        avant = [c for c in closes if c['date'] < debut_mois.strftime('%Y-%m-%d')]
+        dans  = [c for c in closes if debut_mois.strftime('%Y-%m-%d') <= c['date'] < debut_mois_suivant.strftime('%Y-%m-%d')]
 
-            pv_brute = (prix_fin - prix_debut) * quantite
-            pv_eur = convert_currency(pv_brute, devise, 'EUR')
+        if not avant or not dans:
+            erreurs.append(f"{nom} ({ticker_ok}) : données incomplètes ({len(avant)} avant / {len(dans)} dans le mois)")
+            continue
 
-            # Insérer ou remplacer dans cumul_pv_mois
-            existing = conn.execute(
-                'SELECT id FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-                (actif['id'], mois)
-            ).fetchone()
+        prix_debut = float(avant[-1]['close'])
+        prix_fin   = float(dans[-1]['close'])
 
-            if existing:
-                conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
-                           (round(pv_eur, 4), mois + '-recalc', existing['id']))
-            else:
-                conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
-                           (actif['id'], mois, round(pv_eur, 4), mois + '-recalc'))
+        pv_brute = (prix_fin - prix_debut) * quantite
+        pv_eur   = convert_currency(pv_brute, devise, 'EUR')
 
-            resultats.append({
-                'actif': actif['nom_actif'],
-                'ticker': ticker,
-                'prix_debut': round(prix_debut, 4),
-                'prix_fin': round(prix_fin, 4),
-                'pv_eur': round(pv_eur, 2)
-            })
+        # Sauvegarder dans cumul_pv_mois
+        existing = conn.execute(
+            'SELECT id FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
+            (actif['id'], mois)
+        ).fetchone()
 
-        except Exception as e:
-            erreurs.append(f"{actif['nom_actif']} ({ticker}) : {str(e)[:80]}")
+        if existing:
+            conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
+                        (round(pv_eur, 4), mois + '-recalc', existing['id']))
+        else:
+            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
+                        (actif['id'], mois, round(pv_eur, 4), mois + '-recalc'))
+
+        resultats.append({
+            'actif': nom,
+            'ticker': ticker_ok,
+            'prix_debut': round(prix_debut, 4),
+            'prix_fin':   round(prix_fin, 4),
+            'pv_eur':     round(pv_eur, 2)
+        })
 
     conn.commit()
     conn.close()
