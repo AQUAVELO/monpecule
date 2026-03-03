@@ -1954,6 +1954,69 @@ def api_reset_month():
     
     return jsonify({'success': True, 'message': f'Cumul mensuel réinitialisé pour {len(actifs)} actifs'})
 
+@app.route('/api/historique_pv_mois')
+def api_historique_pv_mois():
+    """Retourne le cumul de PV par mois pour l'utilisateur connecté"""
+    if 'user_id' not in session:
+        return jsonify({'error': 'Non connecté'}), 401
+
+    conn = get_connection()
+
+    # Cumul global par mois (toutes les valeurs sont déjà en EUR)
+    mois_rows = conn.execute('''
+        SELECT c.mois, SUM(c.cumul_pv) as total_pv
+        FROM cumul_pv_mois c
+        JOIN actifs a ON c.actif_id = a.id
+        JOIN comptes co ON a.compte_id = co.id
+        WHERE co.user_id = ?
+        GROUP BY c.mois
+        ORDER BY c.mois DESC
+    ''', (session['user_id'],)).fetchall()
+
+    # Détail par compte et par mois
+    detail_rows = conn.execute('''
+        SELECT c.mois, co.nom_compte, SUM(c.cumul_pv) as pv_compte
+        FROM cumul_pv_mois c
+        JOIN actifs a ON c.actif_id = a.id
+        JOIN comptes co ON a.compte_id = co.id
+        WHERE co.user_id = ?
+        GROUP BY c.mois, co.id
+        ORDER BY c.mois DESC, co.nom_compte
+    ''', (session['user_id'],)).fetchall()
+
+    conn.close()
+
+    # Formater les mois en français
+    mois_fr = {
+        '01': 'Janvier', '02': 'Février', '03': 'Mars', '04': 'Avril',
+        '05': 'Mai', '06': 'Juin', '07': 'Juillet', '08': 'Août',
+        '09': 'Septembre', '10': 'Octobre', '11': 'Novembre', '12': 'Décembre'
+    }
+
+    historique = []
+    for row in mois_rows:
+        annee, num_mois = row['mois'].split('-')
+        label = f"{mois_fr.get(num_mois, num_mois)} {annee}"
+        historique.append({
+            'mois': row['mois'],
+            'label': label,
+            'total_pv': round(row['total_pv'] or 0, 2)
+        })
+
+    detail = []
+    for row in detail_rows:
+        annee, num_mois = row['mois'].split('-')
+        label = f"{mois_fr.get(num_mois, num_mois)} {annee}"
+        detail.append({
+            'mois': row['mois'],
+            'label': label,
+            'compte': row['nom_compte'],
+            'pv_compte': round(row['pv_compte'] or 0, 2)
+        })
+
+    return jsonify({'success': True, 'historique': historique, 'detail': detail})
+
+
 @app.route('/api/stats_historique')
 def stats_historique():
     """Retourne des statistiques sur l'historique des prix"""

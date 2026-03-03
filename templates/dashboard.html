@@ -144,9 +144,14 @@
         <div class="stat-card">
             <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span>Plus-value du Mois</span>
-                <button onclick="resetEtRecalculPvMois()" 
-                        style="background: #6c757d; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; cursor: pointer; margin-left: 5px;" 
-                        title="Réinitialiser et recalculer la PV du mois">↻</button>
+                <div style="display: flex; gap: 4px;">
+                    <button onclick="ouvrirHistoriquePvMois()" 
+                            style="background: #667eea; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; cursor: pointer;"
+                            title="Voir l'historique mensuel">📅</button>
+                    <button onclick="resetEtRecalculPvMois()" 
+                            style="background: #6c757d; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; cursor: pointer;" 
+                            title="Réinitialiser et recalculer la PV du mois">↻</button>
+                </div>
             </div>
             <div class="stat-value" style="color: {% if total_month_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}; font-size: 1.5rem;">{{ "%.0f"|format(total_month_pv|convert(user_devise)) }} {{ currency_symbol }}</div>
         </div>
@@ -297,6 +302,22 @@
         </div>
     </div>
     
+    <!-- Modal Historique PV Mensuel -->
+    <div id="historiquePvModal" style="display:none; position:fixed; z-index:1100; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.55); backdrop-filter: blur(3px);">
+        <div style="background:white; margin:40px auto; padding:0; width:92%; max-width:680px; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.3); overflow:hidden; max-height:85vh; display:flex; flex-direction:column;">
+            <div style="background:linear-gradient(135deg,#667eea,#764ba2); padding:20px 24px; display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <h2 style="color:white; margin:0; font-size:1.3rem;">📅 Historique des Plus-values Mensuelles</h2>
+                    <p style="color:rgba(255,255,255,0.8); margin:4px 0 0; font-size:0.85rem;">Cumul archivé par mois</p>
+                </div>
+                <span onclick="document.getElementById('historiquePvModal').style.display='none'" style="color:white; font-size:1.8rem; cursor:pointer; line-height:1; opacity:0.8;">&times;</span>
+            </div>
+            <div id="historiquePvContenu" style="padding:20px 24px; overflow-y:auto; flex:1;">
+                <p style="color:#888; text-align:center;">Chargement...</p>
+            </div>
+        </div>
+    </div>
+
     <div id="editModal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal()">&times;</span>
@@ -503,6 +524,89 @@
                 });
         }
         
+        async function ouvrirHistoriquePvMois() {
+            const modal = document.getElementById('historiquePvModal');
+            const contenu = document.getElementById('historiquePvContenu');
+            modal.style.display = 'block';
+            contenu.innerHTML = '<p style="color:#888; text-align:center; padding:20px;">⏳ Chargement...</p>';
+
+            try {
+                const res = await fetch('/api/historique_pv_mois');
+                const data = await res.json();
+
+                if (!data.success || !data.historique.length) {
+                    contenu.innerHTML = '<p style="color:#888; text-align:center; padding:20px;">Aucun historique disponible.<br><small>Les cumuls s\'accumulent chaque jour via le CRON de 17h45.</small></p>';
+                    return;
+                }
+
+                // Regrouper les détails par mois
+                const detailParMois = {};
+                (data.detail || []).forEach(d => {
+                    if (!detailParMois[d.mois]) detailParMois[d.mois] = [];
+                    detailParMois[d.mois].push(d);
+                });
+
+                // Calculer le total général
+                const totalGeneral = data.historique.reduce((s, r) => s + r.total_pv, 0);
+                const couleurTotal = totalGeneral >= 0 ? '#28a745' : '#dc3545';
+
+                let html = `
+                    <div style="background:#f8f9fa; border-radius:10px; padding:14px 18px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-weight:600; color:#555;">Total archivé (tous mois)</span>
+                        <span style="font-size:1.4rem; font-weight:bold; color:${couleurTotal};">${totalGeneral >= 0 ? '+' : ''}${totalGeneral.toFixed(0)} €</span>
+                    </div>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+                        <thead>
+                            <tr style="background:#f1f3f5; color:#555;">
+                                <th style="padding:10px 12px; text-align:left; border-radius:6px 0 0 6px;">Mois</th>
+                                <th style="padding:10px 12px; text-align:right;">PV Cumulée</th>
+                                <th style="padding:10px 12px; text-align:center; border-radius:0 6px 6px 0;">Détail</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+
+                data.historique.forEach((row, i) => {
+                    const pv = row.total_pv;
+                    const couleur = pv >= 0 ? '#28a745' : '#dc3545';
+                    const bg = i % 2 === 0 ? '#ffffff' : '#fafafa';
+                    const detail = detailParMois[row.mois] || [];
+                    const detailId = `detail_${row.mois.replace('-', '_')}`;
+
+                    let detailHtml = '';
+                    if (detail.length > 1) {
+                        detailHtml = detail.map(d => {
+                            const c = d.pv_compte >= 0 ? '#28a745' : '#dc3545';
+                            return `<div style="display:flex; justify-content:space-between; padding:4px 8px; font-size:0.82rem; color:#555;">
+                                        <span>🏦 ${d.compte}</span>
+                                        <span style="color:${c}; font-weight:600;">${d.pv_compte >= 0 ? '+' : ''}${d.pv_compte.toFixed(0)} €</span>
+                                    </div>`;
+                        }).join('');
+                    }
+
+                    html += `
+                        <tr style="background:${bg}; border-bottom:1px solid #eee;">
+                            <td style="padding:12px 12px; font-weight:600; color:#333;">${row.label}</td>
+                            <td style="padding:12px 12px; text-align:right; font-weight:bold; color:${couleur}; font-size:1rem;">
+                                ${pv >= 0 ? '+' : ''}${pv.toFixed(0)} €
+                            </td>
+                            <td style="padding:12px 12px; text-align:center;">
+                                ${detail.length > 1 ? `<button onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'block':'none'"
+                                    style="background:none; border:1px solid #ddd; border-radius:4px; padding:2px 8px; cursor:pointer; font-size:0.75rem; color:#667eea;">▼ Comptes</button>` : '—'}
+                            </td>
+                        </tr>
+                        ${detail.length > 1 ? `<tr id="${detailId}" style="display:none; background:#f0f4ff;">
+                            <td colspan="3" style="padding:4px 12px 10px;">${detailHtml}</td>
+                        </tr>` : ''}`;
+                });
+
+                html += '</tbody></table>';
+                contenu.innerHTML = html;
+
+            } catch(e) {
+                contenu.innerHTML = '<p style="color:#dc3545; text-align:center; padding:20px;">Erreur lors du chargement de l\'historique.</p>';
+            }
+        }
+
         async function resetEtRecalculPvMois() {
             if (!confirm('Réinitialiser la PV du mois et recalculer depuis aujourd\'hui ?')) return;
             // 1. Reset des cumuls (date mise à 1970 pour permettre recalcul)
