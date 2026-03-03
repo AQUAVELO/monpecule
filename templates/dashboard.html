@@ -144,9 +144,9 @@
         <div class="stat-card">
             <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span>Plus-value du Mois</span>
-                <button onclick="if(confirm('Réinitialiser la PV du mois à 0 ?')) window.location.href='/reset_pv_mois'" 
+                <button onclick="resetEtRecalculPvMois()" 
                         style="background: #6c757d; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; cursor: pointer; margin-left: 5px;" 
-                        title="Réinitialiser la PV du mois">↻</button>
+                        title="Réinitialiser et recalculer la PV du mois">↻</button>
             </div>
             <div class="stat-value" style="color: {% if total_month_pv >= 0 %}#28a745{% else %}#dc3545{% endif %}; font-size: 1.5rem;">{{ "%.0f"|format(total_month_pv|convert(user_devise)) }} {{ currency_symbol }}</div>
         </div>
@@ -503,6 +503,21 @@
                 });
         }
         
+        async function resetEtRecalculPvMois() {
+            if (!confirm('Réinitialiser la PV du mois et recalculer depuis aujourd\'hui ?')) return;
+            // 1. Reset des cumuls (date mise à 1970 pour permettre recalcul)
+            await fetch('/reset_pv_mois');
+            // 2. Déclencher mise à jour avec cumul=true
+            const res = await fetch('/api/update_prices?cumul=true');
+            const data = await res.json();
+            if (data.success) {
+                setTimeout(() => {
+                    window.location.href = window.location.href.split('?')[0] + '?t=' + new Date().getTime();
+                }, 40000);
+                alert('⏳ Recalcul en cours... La page se rechargera dans 40 secondes.');
+            }
+        }
+
         function updatePrices() {
             if (!confirm('Actualiser tous les cours ? Cela prendra environ 40 secondes.')) return;
             

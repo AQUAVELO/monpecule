@@ -1912,18 +1912,19 @@ def reset_pv_mois():
         ).fetchone()
         
         if existing:
+            # '1970-01-01' permet au CRON de recalculer dès aujourd'hui
             conn.execute('UPDATE cumul_pv_mois SET cumul_pv = 0, derniere_mise_a_jour = ? WHERE id = ?',
-                       (datetime.now().strftime("%Y-%m-%d"), existing['id']))
+                       ('1970-01-01', existing['id']))
         else:
             conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, 0, ?)',
-                       (actif['id'], mois_actuel, datetime.now().strftime("%Y-%m-%d")))
+                       (actif['id'], mois_actuel, '1970-01-01'))
         
         updated += 1
     
     conn.commit()
     conn.close()
     
-    flash(f'✅ Plus-value du mois réinitialisée à 0 € pour {updated} actifs', 'success')
+    flash(f'✅ Plus-value du mois réinitialisée. Elle sera recalculée à la prochaine mise à jour CRON.', 'success')
     return redirect(url_for('dashboard'))
 
 @app.route('/api/reset_month')
@@ -2098,8 +2099,8 @@ def update_prices():
                                 conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
                                            (nouveau_cumul, date_actuelle, cumul_existant['id']))
                         else:
-                            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, 0, ?)',
-                                       (row['id'], mois_actuel, date_actuelle))
+                            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
+                                       (row['id'], mois_actuel, pv_jour_eur, date_actuelle))
                     
                     conn.execute('UPDATE actifs SET prix_actuel = ?, prix_veille = ?, devise_cotation = ? WHERE id = ?',
                                (float(p), nouveau_prix_veille, currency, row['id']))
