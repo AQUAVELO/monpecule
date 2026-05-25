@@ -8,11 +8,25 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; }
-        .header { background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+        .header { background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
         .header h1 { color: #333; }
-        .btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.3s; }
+        .header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; min-width: 0; }
+        .header-meta { font-size: 0.8rem; color: #666; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+        .header-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+        .btn { padding: 10px 18px; border: none; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 0.88rem; transition: 0.2s; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; line-height: 1.1; }
+        .btn:hover { transform: translateY(-1px); }
         .btn-logout { background: #dc3545; color: white; }
-        .btn-update { background: #28a745; color: white; margin-right: 10px; }
+        .btn-update { background: #28a745; color: white; }
+        .btn-analyse { background: #17a2b8; color: white; }
+        .btn-conseil-portefeuille { background: #dc2626; color: white; }
+        .btn-conseil-jour { background: #ffc107; color: #333; }
+        .btn-etf { background: #0ea5e9; color: white; }
+        .btn-intraday {
+            background: linear-gradient(135deg, #111827 0%, #2563eb 55%, #16a34a 100%);
+            color: white;
+            box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+        }
+        .btn-intraday:hover { box-shadow: 0 10px 22px rgba(37, 99, 235, 0.3); }
         .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; padding: 30px; max-width: 1600px; margin: 0 auto; }
         .stat-card { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
         .stat-value { font-size: 2rem; font-weight: bold; color: #667eea; }
@@ -52,6 +66,14 @@
 
         .top-performers { max-width: 1400px; margin: 0 auto; padding: 0 30px 20px; display: flex; gap: 15px; }
         .performer-card { flex: 1; padding: 15px 20px; border-radius: 12px; color: white; }
+        .performer-list { list-style: none; margin: 0; padding: 0; }
+        .performer-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.2); }
+        .performer-item:last-child { border-bottom: none; padding-bottom: 0; }
+        .performer-item:first-child { padding-top: 0; }
+        .performer-name { font-weight: 600; font-size: 0.95rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .performer-values { text-align: right; white-space: nowrap; }
+        .performer-pct { font-size: 1.05rem; font-weight: bold; }
+        .performer-pv { font-size: 0.82rem; opacity: 0.9; margin-top: 2px; }
 
         /* Styles pour la fenêtre modale d'analyse technique */
         .analysis-modal { display: none; position: fixed; z-index: 2000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); overflow-y: auto; }
@@ -75,8 +97,13 @@
         
         /* Responsive Mobile */
         @media (max-width: 768px) {
-            .header { flex-direction: column; gap: 10px; text-align: center; }
-            .header h1 { font-size: 1.5rem; }
+            .header { flex-direction: column; gap: 14px; text-align: center; padding: 16px 14px; }
+            .header h1 { font-size: 1.35rem; line-height: 1.2; }
+            .header-right { width: 100%; align-items: stretch; }
+            .header-meta { justify-content: center; font-size: 0.78rem; }
+            .header-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+            .header-actions .btn { width: 100%; padding: 11px 8px; font-size: 0.82rem; margin: 0 !important; }
+            .header-actions .btn-logout { grid-column: span 2; }
             .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 15px; }
             .stat-card { padding: 15px; }
             .stat-card div:first-child { font-size: 0.85rem; }
@@ -86,26 +113,41 @@
             .top-performers { padding: 0 15px 15px; flex-direction: column; }
             .performer-card { font-size: 0.9rem; }
         }
+        @media (max-width: 380px) {
+            .header-actions { grid-template-columns: 1fr; }
+            .header-actions .btn-logout { grid-column: span 1; }
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>💰 MonPecule 💰💰 - Bonjour {{ user_nom }}</h1>
-        <div style="text-align: right;">
-            <div style="font-size: 0.8rem; color: #666; margin-bottom: 5px;">
-                Dernière MAJ: {{ derniere_maj }} | 
-                Devise: 
-                <select onchange="window.location.href='/change_currency/'+this.value" style="padding: 3px 8px; border: 1px solid #ddd; border-radius: 5px; background: white; cursor: pointer;">
-                    <option value="EUR" {% if user_devise == 'EUR' %}selected{% endif %}>EUR (€)</option>
-                    <option value="USD" {% if user_devise == 'USD' %}selected{% endif %}>USD ($)</option>
-                    <option value="GBP" {% if user_devise == 'GBP' %}selected{% endif %}>GBP (£)</option>
-                </select>
+        <h1>💰 MonPecule - Bonjour {{ user_nom }}</h1>
+        <div class="header-right">
+            <div class="header-meta">
+                <span>Dernière MAJ : {{ derniere_maj }}</span>
+                {% if auto_refresh_launched %}
+                <span id="autoRefreshBadge" style="background:#fff3cd;color:#856404;border:1px solid #ffeeba;border-radius:12px;padding:2px 8px;font-size:0.72rem;font-weight:700;">
+                    ⏳ Mise à jour auto…
+                </span>
+                {% endif %}
+                <span>•</span>
+                <span>Devise :
+                    <select onchange="window.location.href='/change_currency/'+this.value" style="padding: 3px 8px; border: 1px solid #ddd; border-radius: 5px; background: white; cursor: pointer; font-size: 0.78rem;">
+                        <option value="EUR" {% if user_devise == 'EUR' %}selected{% endif %}>EUR (€)</option>
+                        <option value="USD" {% if user_devise == 'USD' %}selected{% endif %}>USD ($)</option>
+                        <option value="GBP" {% if user_devise == 'GBP' %}selected{% endif %}>GBP (£)</option>
+                    </select>
+                </span>
             </div>
-            <button class="btn btn-update" onclick="updatePrices()">🔄 Mise à jour</button>
-            <button class="btn" onclick="updateTradingSignals(event)" style="background: #17a2b8; color: white; margin-right: 10px;">📊 Analyse Technique</button>
-            <button onclick="openConseil()" class="btn" style="background: #ffc107; color: #333; margin-right: 10px;">💡 Conseil du jour</button>
-            <a href="/conseil-etf" class="btn" style="background: #17a2b8; color: white; margin-right: 10px; text-decoration: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; font-size: 0.85rem;">🌍 Conseils ETF</a>
-            <a href="{{ url_for('logout') }}"><button class="btn btn-logout">🚪 Déconnexion</button></a>
+            <div class="header-actions">
+                <button class="btn btn-update" onclick="updatePrices()">🔄 Mise à jour</button>
+                <button class="btn btn-analyse" onclick="updateTradingSignals(event)">📊 Analyse Tech.</button>
+                <a href="/opportunites-intraday" class="btn btn-intraday">🎯 Opportunités</a>
+                <a href="/conseil-portefeuille" class="btn btn-conseil-portefeuille">💼 Conseil portefeuille</a>
+                <button onclick="openConseil()" class="btn btn-conseil-jour">💡 Conseil du jour</button>
+                <a href="/conseil-etf" class="btn btn-etf">🌍 Conseils ETF</a>
+                <a href="{{ url_for('logout') }}" class="btn btn-logout">🚪 Déconnexion</a>
+            </div>
         </div>
     </div>
     
@@ -157,20 +199,38 @@
         </div>
     </div>
     
-    {% if top_gainer or top_loser %}
+    {% if top_gainers or top_losers %}
     <div class="top-performers">
-        {% if top_gainer %}
+        {% if top_gainers %}
         <div class="performer-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); box-shadow: 0 4px 15px rgba(40, 167, 69, 0.3);">
-            <div style="font-size: 0.85rem; opacity: 0.9; margin-bottom: 5px;">📈 Meilleure Performance du Jour</div>
-            <div style="font-size: 1.2rem; font-weight: bold;">{{ top_gainer.nom }}</div>
-            <div style="font-size: 1.5rem; font-weight: bold; margin-top: 5px;">+{{ "%.1f"|format(top_gainer.perf) }}%</div>
+            <div style="font-size: 0.85rem; opacity: 0.9; margin-bottom: 10px;">📈 Top 4 performances du jour</div>
+            <ul class="performer-list">
+                {% for item in top_gainers %}
+                <li class="performer-item">
+                    <span class="performer-name">{{ loop.index }}. {{ item.nom }}</span>
+                    <div class="performer-values">
+                        <div class="performer-pct">+{{ "%.1f"|format(item.perf) }}%</div>
+                        <div class="performer-pv">+{{ "%.0f"|format(item.pv_jour_eur|convert(user_devise)) }} {{ currency_symbol }}</div>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
         </div>
         {% endif %}
-        {% if top_loser %}
+        {% if top_losers %}
         <div class="performer-card" style="background: linear-gradient(135deg, #dc3545 0%, #e35d6a 100%); box-shadow: 0 4px 15px rgba(220, 53, 69, 0.3);">
-            <div style="font-size: 0.85rem; opacity: 0.9; margin-bottom: 5px;">📉 Plus Forte Baisse du Jour</div>
-            <div style="font-size: 1.2rem; font-weight: bold;">{{ top_loser.nom }}</div>
-            <div style="font-size: 1.5rem; font-weight: bold; margin-top: 5px;">{{ "%.1f"|format(top_loser.perf) }}%</div>
+            <div style="font-size: 0.85rem; opacity: 0.9; margin-bottom: 10px;">📉 Top 4 baisses du jour</div>
+            <ul class="performer-list">
+                {% for item in top_losers %}
+                <li class="performer-item">
+                    <span class="performer-name">{{ loop.index }}. {{ item.nom }}</span>
+                    <div class="performer-values">
+                        <div class="performer-pct">{{ "%.1f"|format(item.perf) }}%</div>
+                        <div class="performer-pv">{{ "%.0f"|format(item.pv_jour_eur|convert(user_devise)) }} {{ currency_symbol }}</div>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
         </div>
         {% endif %}
     </div>
@@ -534,8 +594,10 @@
                     originalBtn.disabled = false;
                     
                     if (data.price) {
+                        if (data.ticker) form.ticker.value = data.ticker;
                         form.nom.value = data.name || ticker;
                         form.prix_achat.value = data.price;
+                        if (form.prix_actuel) form.prix_actuel.value = data.price;
                         if (form.prix_veille) form.prix_veille.value = data.prev_close || data.price;
                         calculateTotal(form); // Calcul automatique du total après recherche
                         form.querySelector('input[name="nom"]').focus();
@@ -791,6 +853,38 @@
             const analysisModal = document.getElementById('analysisModal');
             if (event.target == analysisModal) closeAnalysisModal();
         }
+
+        {% if auto_refresh_launched %}
+        // Mise à jour automatique des prix déclenchée côté serveur à l'ouverture.
+        // On recharge silencieusement la page une fois la mise à jour terminée
+        // (au plus tard après 50 s, avec un timer min de 20 s).
+        (function autoReloadAfterPricesUpdate() {
+            const alreadyAutoReloaded = new URLSearchParams(window.location.search).get('autoreload') === '1';
+            if (alreadyAutoReloaded) return; // Évite la boucle si la MAJ a échoué
+
+            const reload = () => {
+                const url = new URL(window.location.href);
+                url.searchParams.set('autoreload', '1');
+                url.searchParams.set('t', Date.now());
+                window.location.replace(url.toString());
+            };
+            // Auto-reload de sécurité au bout de 50 secondes
+            const hardTimeout = setTimeout(reload, 50000);
+
+            // Mise à jour visuelle du badge "en cours"
+            const badge = document.getElementById('autoRefreshBadge');
+            let secs = 30;
+            const tick = setInterval(() => {
+                secs -= 1;
+                if (badge) badge.textContent = `⏳ Mise à jour auto en cours… (${secs}s)`;
+                if (secs <= 0) {
+                    clearInterval(tick);
+                    clearTimeout(hardTimeout);
+                    reload();
+                }
+            }, 1000);
+        })();
+        {% endif %}
 
         // Fonction helper pour ouvrir la modale depuis un élément HTML
         function openAnalysisModalFromElement(element) {

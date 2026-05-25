@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Conseil portefeuille - MonPecule</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top left, rgba(220, 38, 38, 0.10), transparent 30%),
+                radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 35%),
+                #f3f6fb;
+            color: #111827;
+        }
+        .page { max-width: 1280px; margin: 0 auto; padding: 32px 20px 60px; }
+        .hero {
+            background: #fff;
+            border: 1px solid rgba(17, 24, 39, 0.08);
+            border-radius: 26px;
+            padding: 26px 28px;
+            box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+            align-items: flex-start;
+            margin-bottom: 22px;
+        }
+        .eyebrow {
+            display: inline-flex; gap: 8px; align-items: center;
+            background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
+            padding: 5px 12px; border-radius: 999px;
+            font-size: 0.82rem; font-weight: 700; margin-bottom: 12px;
+        }
+        h1 { font-size: clamp(1.9rem, 4vw, 2.8rem); line-height: 1.05; letter-spacing: -0.03em; margin-bottom: 10px; }
+        .subtitle { color: #475569; line-height: 1.55; max-width: 760px; }
+        .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; }
+        .btn {
+            border: 0; border-radius: 12px; padding: 10px 16px;
+            font-weight: 800; text-decoration: none; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 8px;
+            transition: 0.18s ease; white-space: nowrap; font-size: 0.92rem;
+        }
+        .btn:hover { transform: translateY(-1px); }
+        .btn-primary { background: #111827; color: #fff; }
+        .btn-secondary { background: #e5e7eb; color: #111827; }
+        .btn-refresh { background: #2563eb; color: #fff; }
+
+        .status-bar {
+            display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+            margin-top: 6px; font-size: 0.86rem; color: #475569;
+        }
+        .pill {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: #f1f5f9; border: 1px solid #e2e8f0;
+            padding: 5px 10px; border-radius: 999px; font-weight: 700;
+        }
+        .pill.stale  { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+        .pill.fresh  { background: #dcfce7; border-color: #bbf7d0; color: #166534; }
+        .pill.info   { background: #dbeafe; border-color: #bfdbfe; color: #1d4ed8; }
+
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-bottom: 22px;
+        }
+        .summary-card {
+            background: #fff;
+            border: 1px solid rgba(17, 24, 39, 0.08);
+            border-radius: 16px;
+            padding: 14px 16px;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+        }
+        .summary-card .label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+        .summary-card .value { font-size: 1.6rem; font-weight: 900; margin-top: 4px; line-height: 1.1; }
+        .summary-card.vendre-fort .value { color: #b91c1c; }
+        .summary-card.vendre      .value { color: #d97706; }
+        .summary-card.alleger     .value { color: #b45309; }
+        .summary-card.couper      .value { color: #c2410c; }
+        .summary-card.renforcer   .value { color: #047857; }
+        .summary-card.conserver   .value { color: #475569; }
+
+        .reco-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+            gap: 16px;
+        }
+        .reco-card {
+            background: #fff;
+            border: 1px solid rgba(17, 24, 39, 0.08);
+            border-left: 6px solid #94a3b8;
+            border-radius: 18px;
+            padding: 18px;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+            display: flex; flex-direction: column; gap: 12px;
+        }
+        .reco-card.action-vendre-fort { border-left-color: #dc2626; }
+        .reco-card.action-vendre      { border-left-color: #f97316; }
+        .reco-card.action-alleger     { border-left-color: #f59e0b; }
+        .reco-card.action-couper      { border-left-color: #ea580c; }
+        .reco-card.action-renforcer   { border-left-color: #16a34a; }
+        .reco-card.action-conserver   { border-left-color: #94a3b8; }
+
+        .reco-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .reco-name { font-size: 1.05rem; font-weight: 900; line-height: 1.2; }
+        .reco-ticker { color: #64748b; font-size: 0.82rem; margin-top: 2px; }
+
+        .action-badge {
+            padding: 6px 12px; border-radius: 999px;
+            font-weight: 900; font-size: 0.78rem; white-space: nowrap;
+        }
+        .action-vendre-fort .action-badge { background: #fee2e2; color: #991b1b; }
+        .action-vendre      .action-badge { background: #ffedd5; color: #9a3412; }
+        .action-alleger     .action-badge { background: #fef3c7; color: #92400e; }
+        .action-couper      .action-badge { background: #ffedd5; color: #c2410c; }
+        .action-renforcer   .action-badge { background: #dcfce7; color: #166534; }
+        .action-conserver   .action-badge { background: #e5e7eb; color: #475569; }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .metric {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 8px 10px;
+        }
+        .metric .lbl { font-size: 0.68rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+        .metric .val { font-weight: 900; font-size: 0.96rem; margin-top: 2px; }
+        .pv-positive { color: #166534; }
+        .pv-negative { color: #b91c1c; }
+        .pv-neutral  { color: #475569; }
+
+        .reasons {
+            margin-top: 4px;
+            border-top: 1px dashed #e2e8f0;
+            padding-top: 10px;
+        }
+        .reasons ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+        .reasons li {
+            font-size: 0.84rem; color: #334155;
+            padding-left: 16px; position: relative;
+        }
+        .reasons li::before {
+            content: "•"; position: absolute; left: 4px; color: #94a3b8; font-weight: 900;
+        }
+
+        .empty {
+            background: #fff;
+            border: 1px dashed #cbd5e1;
+            border-radius: 18px;
+            padding: 32px 24px;
+            text-align: center;
+            color: #475569;
+        }
+
+        @media (max-width: 760px) {
+            .hero { flex-direction: column; }
+            .actions { justify-content: flex-start; }
+            .metrics { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<main class="page">
+    <section class="hero">
+        <div>
+            <div class="eyebrow">💡 Conseil portefeuille • {{ date_seance }} • {{ heure_maj }}</div>
+            <h1>Que vendre, alléger ou conserver&nbsp;?</h1>
+            <p class="subtitle">
+                Cette page croise pour chaque ligne du portefeuille les signaux techniques
+                (RSI, MACD, moyennes mobiles, force du signal) avec le sentiment des news
+                et ta plus-value latente. Les recommandations restent éducatives et ne
+                constituent pas un conseil financier personnalisé.
+            </p>
+            <div class="status-bar">
+                {% if signals_last_updated %}
+                <span class="pill {% if is_stale %}stale{% else %}fresh{% endif %}">
+                    {% if is_stale %}⏳{% else %}✅{% endif %} Signaux du {{ signals_last_updated }}
+                </span>
+                {% else %}
+                <span class="pill stale">⏳ Aucun signal en cache</span>
+                {% endif %}
+                {% if refresh_launched %}
+                <span class="pill info">🔄 Recalcul lancé en arrière-plan — rafraîchis dans 1 à 2 min</span>
+                {% elif signals_running %}
+                <span class="pill info">🔄 Analyse technique déjà en cours…</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="actions">
+            <a class="btn btn-refresh" href="/conseil-portefeuille?refresh=1">↻ Recalculer les signaux</a>
+            <a class="btn btn-primary" href="/opportunites-intraday">🎯 Opportunités du jour</a>
+            <a class="btn btn-secondary" href="/dashboard">Retour</a>
+        </div>
+    </section>
+
+    <section class="summary">
+        <div class="summary-card couper"><div class="label">Couper perte</div><div class="value">{{ counters.COUPER_PERTE }}</div></div>
+        <div class="summary-card vendre-fort"><div class="label">Vendre vite</div><div class="value">{{ counters.VENDRE_FORT }}</div></div>
+        <div class="summary-card vendre"><div class="label">Vendre</div><div class="value">{{ counters.VENDRE }}</div></div>
+        <div class="summary-card alleger"><div class="label">Alléger</div><div class="value">{{ counters.ALLEGER }}</div></div>
+        <div class="summary-card renforcer"><div class="label">Renforcer</div><div class="value">{{ counters.RENFORCER }}</div></div>
+        <div class="summary-card conserver"><div class="label">Conserver</div><div class="value">{{ counters.CONSERVER }}</div></div>
+    </section>
+
+    {% if recommendations %}
+    <section class="reco-grid">
+        {% for r in recommendations %}
+        <article class="reco-card {{ r.action_class }}">
+            <div class="reco-head">
+                <div>
+                    <div class="reco-name">{{ r.name }}</div>
+                    <div class="reco-ticker">{{ r.ticker }} • {{ r.compte }} • x{{ r.quantite }}</div>
+                </div>
+                <span class="action-badge">{{ r.action_label }}</span>
+            </div>
+
+            <div class="metrics">
+                <div class="metric">
+                    <div class="lbl">PV latente</div>
+                    <div class="val {% if r.pv_pct > 0 %}pv-positive{% elif r.pv_pct < 0 %}pv-negative{% else %}pv-neutral{% endif %}">
+                        {{ "%+.1f"|format(r.pv_pct) }}%
+                    </div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">RSI</div>
+                    <div class="val">{% if r.rsi_14 is not none %}{{ "%.0f"|format(r.rsi_14) }}{% else %}—{% endif %}</div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">Score vente</div>
+                    <div class="val">{{ "%.0f"|format(r.sell_score) }}/100</div>
+                </div>
+            </div>
+
+            <div class="metrics">
+                <div class="metric">
+                    <div class="lbl">Technique</div>
+                    <div class="val">{% if r.technical_score is not none %}{{ "%.0f"|format(r.technical_score) }}/100{% else %}—{% endif %}</div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">Sentiment</div>
+                    <div class="val">{% if r.sentiment_score is not none %}{{ "%.2f"|format(r.sentiment_score) }}{% else %}—{% endif %}</div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">News</div>
+                    <div class="val">{{ r.nb_news }}</div>
+                </div>
+            </div>
+
+            <div class="reasons">
+                <ul>
+                    {% for reason in r.reasons %}
+                    <li>{{ reason }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </article>
+        {% endfor %}
+    </section>
+    {% else %}
+    <section class="empty">
+        <h3>Aucun actif dans le portefeuille</h3>
+        <p style="margin-top: 8px;">Ajoute des actifs depuis le dashboard pour obtenir des recommandations.</p>
+    </section>
+    {% endif %}
+</main>
+
+<script>
+{% if refresh_launched or signals_running %}
+// Rechargement automatique 90 s après lancement d'un recalcul pour récupérer
+// les nouveaux signaux et donc les recommandations à jour.
+setTimeout(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('refresh');
+    window.location.replace(url.toString());
+}, 90000);
+{% endif %}
+</script>
+</body>
+</html>

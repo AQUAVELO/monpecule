@@ -8,6 +8,8 @@ import yfinance as yf
 import requests
 from datetime import datetime
 import threading
+import smtplib
+from email.message import EmailMessage
 
 app = Flask(__name__)
 app.secret_key = 'monpecule_secret_key_2026_change_this_in_production'
@@ -15,6 +17,12 @@ app.secret_key = 'monpecule_secret_key_2026_change_this_in_production'
 # Token pour les appels CRON (peut être défini via variable d'environnement)
 CRON_TOKEN = os.environ.get('CRON_TOKEN', 'monpecule_cron_2026_change_this')
 EODHD_API_KEY = os.environ.get('EODHD_API_KEY', '6980ce5e766dd6.91379679')
+INTRADAY_EMAIL_TO = os.environ.get('INTRADAY_EMAIL_TO', 'aqua.cannes@gmail.com')
+SMTP_HOST = os.environ.get('SMTP_HOST')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USER = os.environ.get('SMTP_USER')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
+SMTP_FROM = os.environ.get('SMTP_FROM') or SMTP_USER
 
 # Redirection www vers domaine principal
 @app.before_request
@@ -250,6 +258,34 @@ def init_db():
                       devise TEXT,
                       data_points INTEGER)''')
 
+        # Table ticker_fundamentals (cache des fondamentaux : dividende, PER)
+        c.execute('''CREATE TABLE IF NOT EXISTS ticker_fundamentals
+                     (ticker TEXT PRIMARY KEY,
+                      dividend_yield REAL,
+                      dividend_rate REAL,
+                      trailing_pe REAL,
+                      forward_pe REAL,
+                      currency TEXT,
+                      last_updated TEXT)''')
+
+        # Recommandations intraday envoyées par email (sert au récap de 17h)
+        c.execute('''CREATE TABLE IF NOT EXISTS intraday_email_recommendations
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      sent_date TEXT,
+                      sent_time TEXT,
+                      ticker TEXT,
+                      name TEXT,
+                      direction TEXT,
+                      entry REAL,
+                      stop_loss REAL,
+                      target REAL,
+                      technical_score REAL,
+                      sentiment_score REAL,
+                      news_count INTEGER,
+                      devise TEXT,
+                      created_at TEXT,
+                      UNIQUE(sent_date, ticker, direction))''')
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -291,6 +327,14 @@ SBF120_TICKERS = [
     "SMCP.PA", "SQS.PA", "STEF.PA", "SYN.PA", "TCH.PA", "TER.PA", "TFF.PA", 
     "TNG.PA", "TOUP.PA", "TRICS.PA", "TXT.PA", "U10.PA", "VANTI.PA", "VET.PA", 
     "VIL.PA", "VRLA.PA", "WAVE.PA", "WED.PA", "XIL.PA"
+]
+
+CAC40_TICKERS = [
+    "AI.PA", "AIR.PA", "ALO.PA", "MT.PA", "CS.PA", "BNP.PA", "EN.PA", "CAP.PA",
+    "CA.PA", "ACA.PA", "BN.PA", "DSY.PA", "EDEN.PA", "ENG.PA", "EL.PA", "ERF.PA",
+    "RMS.PA", "KER.PA", "OR.PA", "LR.PA", "MC.PA", "ML.PA", "ORA.PA", "RI.PA",
+    "PUB.PA", "RNO.PA", "SAF.PA", "SGO.PA", "SAN.PA", "SU.PA", "GLE.PA", "STLA.PA",
+    "STM.PA", "TEP.PA", "HO.PA", "TTE.PA", "URW.PA", "VIE.PA", "DG.PA", "VIV.PA"
 ]
 
 TICKER_NAMES_MAP = {
@@ -403,9 +447,17 @@ FORCED_SYMBOL_MAP = {
     "AM CORE MSCI WORLD UC ETF USD": "MWRD.PA",
     "BNP": "BNP.PA",  # BNP Paribas sur Euronext Paris
     "AXA": "CS.PA",   # AXA SA sur Euronext Paris
+    "SOPRA": "SOP.PA",  # Sopra Steria Group sur Euronext Paris
+    "SOPRA STERIA": "SOP.PA",
+    "SOPRA STERIA GROUP": "SOP.PA",
+    "SOP": "SOP.PA",
     "IE00BHZRQZ17": "FLXI.PA", # Franklin FTSE India (EUR)
     "FRANKLIN FSTE INDIA UCITS ETF": "FLXI.PA", # Cas spécifique utilisateur (typo FSTE)
     "FRANKLIN FTSE INDIA UCITS ETF": "FLXI.PA",
+    # Or : Yahoo renvoie souvent AMGOLDN.MX en premier (3156 MXN affiché à tort en EUR)
+    "FR0013416716": "GOLD.MI",
+    "AMGOLDN.MX": "GOLD.MI",
+    "AMUNDI PHYSICAL GOLD ETC C": "GOLD.MI",
 }
 
 def normalize_forced_symbol(identifier):
@@ -414,6 +466,10 @@ def normalize_forced_symbol(identifier):
         return identifier
 
     ident_upper = identifier.upper().strip()
+
+    # ISIN Amundi Physical Gold ETC C (souvent collé à un libellé dans ticker_isin)
+    if "FR0013416716" in ident_upper:
+        return "GOLD.MI"
 
     # Match exact direct
     if ident_upper in FORCED_SYMBOL_MAP:
@@ -500,6 +556,12 @@ def fetch_price_from_api(identifier):
                 if quotes:
                     ident_upper = identifier.upper()
                     is_etf_query = any(k in ident_upper for k in ['ETF', 'TRACKER', 'UCITS', 'MSCI'])
+                    # ISIN France (12 car.) : éviter Mexique / hors-Europe quand plusieurs cotes (scores égaux → max = premier résultat Yahoo)
+                    is_fr_isin = (
+                        len(ident_upper) == 12
+                        and ident_upper.startswith('FR')
+                        and ident_upper[2:11].isdigit()
+                    )
 
                     def quote_score(q):
                         q_symbol = (q.get('symbol') or '').upper()
@@ -519,6 +581,15 @@ def fetch_price_from_api(identifier):
                         # Bonus correspondance exacte du symbole saisi
                         if q_symbol == ident_upper:
                             score += 200
+                        # ISIN FR : cote où l'ISIN apparaît dans le symbole (ex. FR0013416716.SG)
+                        if is_fr_isin and ident_upper in q_symbol:
+                            score += 260
+                        # ISIN FR : favoriser Europe, pénaliser Mexique / hors-zone (évite AMGOLDN.MX ≈ même nom, devise MXN)
+                        if is_fr_isin:
+                            if q_symbol.endswith(('.PA', '.AS', '.BR', '.MI', '.DE', '.SG', '.SW', '.VI', '.LS', '.IR', '.HE')):
+                                score += 85
+                            if q_symbol.endswith('.MX') or 'MEX' in q_exchange or 'MEXICO' in q_exchange:
+                                score -= 400
                         return score
 
                     best_quote = max(quotes, key=quote_score)
@@ -584,8 +655,9 @@ def fetch_price_from_api(identifier):
                 meta = result[0].get('meta', {})
                 price = meta.get('regularMarketPrice')
                 prev_close = meta.get('previousClose')
-                yahoo_currency = meta.get('currency', '').upper()
-                currency = detect_currency_from_symbol(symbol)
+                yahoo_currency = (meta.get('currency') or '').strip().upper()
+                # Devise réelle Yahoo (MXN, USD…) ; sinon heuristique symbole (évite d'afficher des MXN comme des EUR)
+                currency = yahoo_currency if yahoo_currency else detect_currency_from_symbol(symbol)
                 
                 # Conversion pence -> livres pour TOUTES les actions britanniques (GBP)
                 if currency == 'GBP' and price and price > 10:
@@ -683,6 +755,61 @@ def fix_franklin():
         flash("❌ Franklin India non trouvé.", "error")
         
     return redirect(url_for('dashboard'))
+
+
+@app.route('/fix_amundi_gold')
+def fix_amundi_gold():
+    """Corrige ticker + cours pour Amundi Physical Gold ETC C (bug Yahoo MXN → affiché en EUR)."""
+    if "user_id" not in session:
+        return redirect(url_for("index"))
+    conn = get_connection()
+    uid = session["user_id"]
+    rows = conn.execute(
+        """
+        SELECT a.id, a.ticker_isin, a.nom_actif
+        FROM actifs a
+        JOIN comptes c ON a.compte_id = c.id
+        WHERE c.user_id = ?
+          AND (
+            INSTR(UPPER(IFNULL(a.ticker_isin, '')), 'FR0013416716') > 0
+            OR INSTR(UPPER(IFNULL(a.ticker_isin, '')), 'AMGOLDN') > 0
+            OR UPPER(IFNULL(a.nom_actif, '')) LIKE '%PHYSICAL GOLD ETC C%'
+          )
+        """,
+        (uid,),
+    ).fetchall()
+    if not rows:
+        conn.close()
+        flash("Aucun actif Amundi Physical Gold ETC C trouvé.", "error")
+        return redirect(url_for("dashboard"))
+
+    p, _name, pv, currency = fetch_price_from_api("GOLD.MI")
+    if not p:
+        conn.close()
+        flash("Impossible de récupérer le cours pour GOLD.MI. Réessayez plus tard.", "error")
+        return redirect(url_for("dashboard"))
+
+    cur = (currency or "EUR").upper()
+    for r in rows:
+        conn.execute(
+            """
+            UPDATE actifs
+            SET ticker_isin = 'GOLD.MI',
+                devise_cotation = ?,
+                prix_actuel = ?,
+                prix_veille = ?
+            WHERE id = ?
+            """,
+            (cur, float(p), float(pv) if pv is not None else float(p), r["id"]),
+        )
+    conn.commit()
+    conn.close()
+    flash(
+        f"✅ {len(rows)} ligne(s) corrigée(s) : ticker GOLD.MI, cours ~{p:.2f} {cur}.",
+        "success",
+    )
+    return redirect(url_for("dashboard"))
+
 
 @app.route('/api/fix_ticker')
 def api_fix_ticker():
@@ -783,6 +910,14 @@ def logout():
 @app.route('/dashboard')
 def dashboard():
     if 'user_id' not in session: return redirect(url_for('index'))
+
+    # Mise à jour automatique des prix à l'ouverture du dashboard
+    # (anti-doublon : 5 min minimum entre deux rafraîchissements automatiques)
+    auto_refresh_launched, _ = trigger_prices_refresh_async(
+        user_id=session['user_id'], cumul=False, is_cron=False,
+        min_interval_seconds=300,
+    )
+
     try:
         conn = get_connection()
         comptes = conn.execute('SELECT * FROM comptes WHERE user_id = ?', (session['user_id'],)).fetchall()
@@ -873,7 +1008,11 @@ def dashboard():
             # Calcul de la variation journalière en %
             if p_veille > 0:
                 day_perf_pct = ((p_actuel - p_veille) / p_veille) * 100
-                day_performances.append({'nom': a['nom_actif'], 'perf': day_perf_pct})
+                day_performances.append({
+                    'nom': a['nom_actif'],
+                    'perf': day_perf_pct,
+                    'pv_jour_eur': day_pv_eur
+                })
             
             # Additionner en EUR
             total_achat += val_achat_eur
@@ -888,9 +1027,10 @@ def dashboard():
                 comptes_stats[a['compte_id']]['pv'] += pv_eur
                 comptes_stats[a['compte_id']]['day_pv'] += day_pv_eur
         
-        # Trouver les top/bottom performers
-        top_gainer = max(day_performances, key=lambda x: x['perf']) if day_performances else None
-        top_loser = min(day_performances, key=lambda x: x['perf']) if day_performances else None
+        # Top 4 / bottom 4 performers du jour
+        sorted_day_perfs = sorted(day_performances, key=lambda x: x['perf'], reverse=True)
+        top_gainers = sorted_day_perfs[:4]
+        top_losers = sorted(day_performances, key=lambda x: x['perf'])[:4]
         
         conn.close()
         
@@ -901,8 +1041,9 @@ def dashboard():
                               total_day_pv=total_day_pv, total_month_pv=total_month_pv,
                               derniere_maj=derniere_maj,
                               comptes_stats=comptes_stats,
-                              top_gainer=top_gainer, top_loser=top_loser,
+                              top_gainers=top_gainers, top_losers=top_losers,
                               user_devise=user_devise, currency_symbol=currency_symbol,
+                              auto_refresh_launched=auto_refresh_launched,
                               cron_token=CRON_TOKEN)
     except Exception as e:
         return f"Erreur Dashboard: {e}"
@@ -922,13 +1063,23 @@ def add_actif():
     if 'user_id' not in session: return redirect(url_for('index'))
     compte_id = request.form.get('compte_id')
     nom = request.form.get('nom')
-    ticker = request.form.get('ticker')
+    ticker_input = (request.form.get('ticker') or '').strip()
+    # Si l'utilisateur saisit le symbole dans le champ Nom, on le récupère quand même.
+    ticker = normalize_forced_symbol(ticker_input or nom or '')
     pa = safe_float(request.form.get('prix_achat'))
     q = safe_int(request.form.get('quantite'), 1)
     fr = safe_float(request.form.get('frais'))
     pnow = safe_float(request.form.get('prix_actuel'))
     date_achat = request.form.get('date_achat', '')
     devise_cotation = detect_currency_from_symbol(ticker)
+
+    if ticker and pnow <= 0:
+        price, fetched_name, prev_close, currency = fetch_price_from_api(ticker)
+        if price is not None:
+            pnow = price
+            devise_cotation = currency or devise_cotation
+            if not nom:
+                nom = fetched_name or ticker
     
     conn = get_connection()
     # Initialiser prix_veille avec prix_achat pour que la PV du premier jour soit calculée par rapport à l'achat
@@ -995,7 +1146,13 @@ def delete_compte(compte_id):
 @app.route('/api/search_ticker/<ticker>')
 def search_ticker(ticker):
     price, name, prev_close, currency = fetch_price_from_api(ticker)
-    return jsonify({'price': price, 'name': name, 'prev_close': prev_close, 'currency': currency})
+    return jsonify({
+        'price': price,
+        'name': name,
+        'prev_close': prev_close,
+        'currency': currency,
+        'ticker': normalize_forced_symbol(ticker)
+    })
 
 # Cache global pour l'analyse
 conseil_cache = {
@@ -1004,6 +1161,698 @@ conseil_cache = {
 }
 
 import concurrent.futures
+
+
+INTRADAY_BULLETIN_PROMPT = """Tu es un analyste financier expert en trading intraday sur les marchés actions (CAC 40, S&P 500, Nasdaq). Tu travailles pour le site monpecule.fr, dont le public est composé de débutants qui apprennent à trader. Ton rôle est de produire des analyses claires, pédagogiques et actionnables, sans jargon inutile — ou en expliquant chaque terme technique utilisé.
+
+---
+
+Pour la séance du {DATE}, génère un bulletin intraday complet structuré en 3 blocs :
+
+BLOC 1 — Calendrier économique
+• Liste les événements macro importants de la journée (heure, indicateur, pays, impact attendu : faible / moyen / fort)
+• Explique en 1 phrase simple pourquoi chaque événement fort peut faire bouger les marchés
+
+BLOC 2 — Analyse technique du marché
+• Donne l'état général des indices principaux (CAC 40, S&P 500) : tendance dominante, zone de support et résistance du jour
+• Identifie 1 à 2 actions ou secteurs à surveiller en priorité
+• Pour chaque opportunité, précise : la direction (achat / vente), le niveau d'entrée suggéré, le stop-loss et l'objectif de gain
+
+BLOC 3 — Signaux de trading
+• Présente 2 à 3 signaux concrets pour la journée au format :
+  → Actif : [nom de l'action]
+  → Direction : Achat ou Vente
+  → Entrée : [niveau de prix]
+  → Stop-loss : [niveau de prix]
+  → Objectif : [niveau de prix]
+  → Justification : [explication simple en 2-3 phrases pour un débutant]
+
+---
+
+• Écris pour un débutant complet : définis chaque terme technique la première fois qu'il apparaît
+• Sois factuel et précis — évite les formulations vagues comme "le marché pourrait monter"
+• Utilise des emojis discrets pour aérer (📅 🔍 📊) mais ne surcharge pas
+• Longueur idéale : 400 à 600 mots par bulletin
+• Termine toujours par une note de risque rappelant que le trading comporte des pertes et que le contenu est éducatif, pas un conseil financier
+
+---
+
+Si tu es sollicité plusieurs fois dans la journée, adapte le bulletin en précisant l'heure de mise à jour et en signalant tout changement notable par rapport au bulletin du matin (ex : "⚠️ Mise à jour 14h30 — Publication des chiffres de l'emploi US : résultat supérieur aux attentes, révision du signal sur le S&P 500")."""
+
+
+# =============================================================================
+# Fondamentaux : dividende et PER (cache yfinance)
+# =============================================================================
+_fundamentals_refresh_lock = threading.Lock()
+_fundamentals_refresh_running = False
+
+
+def fetch_fundamentals_yfinance(ticker):
+    """Récupère dividende et PER pour un ticker via yfinance.
+
+    Retourne un dict ou None en cas d'échec. Les champs peuvent être None
+    si yfinance ne les fournit pas (ETF, action sans dividende, etc.).
+    """
+    try:
+        t = yf.Ticker(ticker)
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            # Sur certaines versions de yfinance, .info peut lever ; on tente fast_info
+            try:
+                fi = getattr(t, 'fast_info', None)
+                if fi:
+                    info = {
+                        'currency': getattr(fi, 'currency', None),
+                        'trailingPE': None,
+                        'dividendYield': None,
+                        'dividendRate': None,
+                    }
+            except Exception:
+                info = {}
+
+        dy = info.get('dividendYield')
+        if dy is not None:
+            try:
+                dy = float(dy)
+                # yfinance peut retourner 0.025 (décimal) ou 2.5 (%) selon versions
+                if dy < 1:
+                    dy *= 100
+            except Exception:
+                dy = None
+
+        def _safe(value):
+            try:
+                f = float(value)
+                if f != f or f in (float('inf'), float('-inf')):
+                    return None
+                return f
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            'ticker': ticker,
+            'dividend_yield': dy,
+            'dividend_rate': _safe(info.get('dividendRate')),
+            'trailing_pe': _safe(info.get('trailingPE')),
+            'forward_pe': _safe(info.get('forwardPE')),
+            'currency': info.get('currency') or detect_currency_from_symbol(ticker),
+        }
+    except Exception as e:
+        print(f"fetch_fundamentals_yfinance {ticker}: {e}")
+        return None
+
+
+def _run_fundamentals_refresh(tickers):
+    """Rafraîchit les fondamentaux des tickers en parallèle et écrit en base."""
+    global _fundamentals_refresh_running
+    try:
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            future_to_t = {ex.submit(fetch_fundamentals_yfinance, t): t for t in tickers}
+            for fut in concurrent.futures.as_completed(future_to_t):
+                try:
+                    res = fut.result()
+                    if res:
+                        results.append(res)
+                except Exception as e:
+                    print(f"[fundamentals] erreur future: {e}")
+
+        if not results:
+            return
+
+        now = datetime.now().strftime('%d/%m/%Y à %H:%M')
+        conn = get_connection()
+        try:
+            for r in results:
+                conn.execute('''INSERT INTO ticker_fundamentals
+                               (ticker, dividend_yield, dividend_rate, trailing_pe, forward_pe, currency, last_updated)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)
+                               ON CONFLICT(ticker) DO UPDATE SET
+                                 dividend_yield=excluded.dividend_yield,
+                                 dividend_rate=excluded.dividend_rate,
+                                 trailing_pe=excluded.trailing_pe,
+                                 forward_pe=excluded.forward_pe,
+                                 currency=excluded.currency,
+                                 last_updated=excluded.last_updated''',
+                             (r['ticker'], r['dividend_yield'], r['dividend_rate'],
+                              r['trailing_pe'], r['forward_pe'], r['currency'], now))
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"[fundamentals] {len(results)} tickers rafraîchis")
+    except Exception as e:
+        print(f"[fundamentals] erreur globale: {e}")
+    finally:
+        with _fundamentals_refresh_lock:
+            _fundamentals_refresh_running = False
+
+
+def trigger_fundamentals_refresh_async(tickers, max_age_hours=24, force=False):
+    """Lance un rafraîchissement des fondamentaux en arrière-plan pour les tickers
+    dont la donnée en cache est absente ou plus vieille que max_age_hours.
+
+    Retourne True si lancé, False sinon (déjà en cours ou rien à rafraîchir).
+    """
+    global _fundamentals_refresh_running
+    tickers = [t.upper().strip() for t in tickers if t]
+    if not tickers:
+        return False
+
+    # Sélection des tickers à rafraîchir
+    cutoff = datetime.now()
+    to_refresh = []
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            'SELECT ticker, last_updated FROM ticker_fundamentals WHERE ticker IN ({})'.format(
+                ','.join('?' for _ in tickers)
+            ),
+            tickers,
+        ).fetchall()
+        last_by_ticker = {row['ticker'].upper(): row['last_updated'] for row in rows}
+        conn.close()
+    except Exception:
+        last_by_ticker = {}
+
+    for t in tickers:
+        last_str = last_by_ticker.get(t)
+        if force or not last_str:
+            to_refresh.append(t)
+            continue
+        last_dt = _parse_signal_datetime(last_str)
+        if last_dt is None or (cutoff - last_dt).total_seconds() > max_age_hours * 3600:
+            to_refresh.append(t)
+
+    if not to_refresh:
+        return False
+
+    with _fundamentals_refresh_lock:
+        if _fundamentals_refresh_running:
+            return False
+        _fundamentals_refresh_running = True
+
+    thread = threading.Thread(target=_run_fundamentals_refresh, args=(to_refresh,), daemon=True)
+    thread.start()
+    return True
+
+
+def get_fundamentals_for_tickers(tickers):
+    """Retourne {ticker_upper: {dividend_yield, dividend_rate, trailing_pe, ...}}."""
+    tickers = [t.upper().strip() for t in tickers if t]
+    if not tickers:
+        return {}
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            'SELECT * FROM ticker_fundamentals WHERE ticker IN ({})'.format(
+                ','.join('?' for _ in tickers)
+            ),
+            tickers,
+        ).fetchall()
+        conn.close()
+        return {row['ticker'].upper(): dict(row) for row in rows}
+    except Exception as e:
+        print(f"get_fundamentals_for_tickers: {e}")
+        return {}
+
+
+def _parse_signal_datetime(value):
+    """Parse le champ last_updated 'DD/MM/YYYY à HH:MM' en datetime, None si invalide."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), '%d/%m/%Y à %H:%M')
+    except Exception:
+        try:
+            return datetime.strptime(value.split(' à ')[0].strip(), '%d/%m/%Y')
+        except Exception:
+            return None
+
+
+def get_trading_signals_freshness():
+    """Retourne (count, last_updated_str, last_updated_dt) pour la table trading_signals."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            'SELECT COUNT(*) as cnt, MAX(last_updated) as last_updated FROM trading_signals'
+        ).fetchone()
+        count = row['cnt'] if row else 0
+        last_str = row['last_updated'] if row else None
+    except Exception:
+        count, last_str = 0, None
+    finally:
+        conn.close()
+    return count, last_str, _parse_signal_datetime(last_str)
+
+
+def build_intraday_universe(include_cac40=True, include_user_assets=True, extra_tickers=None):
+    """Construit l'univers de tickers à analyser et un mapping nom complet.
+
+    Par défaut : CAC 40 + tous les actifs présents dans le portefeuille des utilisateurs.
+    """
+    universe = set()
+    ticker_names = dict(TICKER_NAMES_MAP)
+
+    if include_cac40:
+        universe.update(t.upper() for t in CAC40_TICKERS)
+
+    if include_user_assets:
+        try:
+            conn = get_connection()
+            rows = conn.execute(
+                'SELECT DISTINCT ticker_isin, nom_actif FROM actifs WHERE ticker_isin IS NOT NULL AND ticker_isin != ""'
+            ).fetchall()
+            conn.close()
+            for r in rows:
+                t = (r['ticker_isin'] or '').upper().strip()
+                if t:
+                    universe.add(t)
+                    ticker_names.setdefault(t, r['nom_actif'] or t)
+        except Exception as e:
+            print(f"build_intraday_universe: erreur lecture actifs: {e}")
+
+    if extra_tickers:
+        for t in extra_tickers:
+            if t:
+                universe.add(t.upper())
+
+    return sorted(universe), ticker_names
+
+
+# Verrou pour éviter plusieurs rafraîchissements simultanés
+_signals_refresh_lock = threading.Lock()
+_signals_refresh_running = False
+
+
+def _run_trading_signals_refresh(tickers, ticker_names):
+    """Exécute l'analyse technique et remplace la table trading_signals."""
+    global _signals_refresh_running
+    try:
+        print(f"[signaux] Démarrage de l'analyse technique pour {len(tickers)} tickers")
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_ticker = {
+                executor.submit(analyze_ticker_technical, t, EODHD_API_KEY, ticker_names): t
+                for t in tickers
+            }
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                try:
+                    res = future.result()
+                    if res:
+                        results.append(res)
+                except Exception as e:
+                    print(f"[signaux] erreur future: {e}")
+
+        if not results:
+            print("[signaux] Aucun résultat exploitable, table conservée.")
+            return
+
+        now = datetime.now().strftime('%d/%m/%Y à %H:%M')
+        conn = get_connection()
+        try:
+            conn.execute('DELETE FROM trading_signals')
+            for r in results:
+                conn.execute('''INSERT INTO trading_signals
+                               (ticker, name, rsi_14, sma_20, sma_50, ema_12, ema_26,
+                                bb_upper, bb_middle, bb_lower, macd, macd_signal,
+                                current_price, previous_close, technical_score,
+                                signal, signal_class, signal_strength,
+                                rsi_score, ma_score, bb_score, macd_score,
+                                last_updated, devise, data_points)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                             (r['ticker'], r['name'], r['rsi_14'], r['sma_20'], r['sma_50'],
+                              r['ema_12'], r['ema_26'], r['bb_upper'], r['bb_middle'], r['bb_lower'],
+                              r['macd'], r['macd_signal'], r['current_price'], r['previous_close'],
+                              r['technical_score'], r['signal'], r['signal_class'], r['signal_strength'],
+                              r['rsi_score'], r['ma_score'], r['bb_score'], r['macd_score'],
+                              now, r['devise'], r['data_points']))
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"[signaux] Analyse technique terminée : {len(results)} tickers sauvegardés")
+    except Exception as e:
+        print(f"[signaux] erreur globale: {e}")
+    finally:
+        with _signals_refresh_lock:
+            _signals_refresh_running = False
+
+
+def trigger_trading_signals_refresh_async(tickers=None, ticker_names=None):
+    """Lance en arrière-plan un rafraîchissement de la table trading_signals.
+
+    Retourne True si lancé, False si un rafraîchissement est déjà en cours."""
+    global _signals_refresh_running
+    with _signals_refresh_lock:
+        if _signals_refresh_running:
+            return False
+        _signals_refresh_running = True
+
+    if tickers is None:
+        tickers, ticker_names = build_intraday_universe()
+    elif ticker_names is None:
+        _, ticker_names = build_intraday_universe()
+
+    thread = threading.Thread(
+        target=_run_trading_signals_refresh,
+        args=(tickers, ticker_names),
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def build_intraday_opportunities(limit=6, tickers=None, prefer_today=True):
+    """Sélectionne les meilleurs signaux techniques et ajoute des niveaux simples de trading.
+
+    - Privilégie les signaux mis à jour aujourd'hui (filtre par date).
+    - Ajoute un tie-breaker quotidien pour faire tourner les opportunités
+      lorsque plusieurs actions ont des scores très proches.
+    """
+    tickers_filter = {t.upper() for t in tickers} if tickers else None
+    today_str = datetime.now().strftime('%d/%m/%Y')
+
+    conn = get_connection()
+    try:
+        technical_rows = conn.execute('''
+            SELECT *
+            FROM trading_signals
+            WHERE current_price IS NOT NULL
+              AND current_price > 0
+              AND signal_strength IN ('ACHAT FORT', 'ACHAT', 'VENTE FORTE', 'VENTE')
+            LIMIT 200
+        ''').fetchall()
+
+        sentiment_rows = conn.execute('SELECT ticker, score, nb_news, signal FROM market_analysis').fetchall()
+        sentiment_by_ticker = {row['ticker']: dict(row) for row in sentiment_rows}
+    except Exception:
+        technical_rows = []
+        sentiment_by_ticker = {}
+    finally:
+        conn.close()
+
+    today_rows = [r for r in technical_rows if (r['last_updated'] or '').startswith(today_str)]
+    if prefer_today and today_rows:
+        rows_to_use = today_rows
+    else:
+        rows_to_use = list(technical_rows)
+
+    daily_seed = int(datetime.now().strftime('%Y%m%d'))
+
+    opportunities = []
+    for row in rows_to_use:
+        item = dict(row)
+        if tickers_filter and item['ticker'].upper() not in tickers_filter:
+            continue
+        sentiment = sentiment_by_ticker.get(item['ticker'], {})
+        sentiment_score = safe_float(sentiment.get('score'), 0.5)
+        news_count = safe_int(sentiment.get('nb_news'), 0)
+        technical_score = safe_float(item.get('technical_score'), 0)
+        price = safe_float(item.get('current_price'))
+        direction = 'Achat' if 'ACHAT' in (item.get('signal_strength') or '') else 'Vente'
+        if direction == 'Achat':
+            technical_strength = technical_score
+            sentiment_boost = sentiment_score * 20
+            stop_loss = price * 0.985
+            target = price * 1.025
+        else:
+            technical_strength = 100 - technical_score
+            sentiment_boost = (1 - sentiment_score) * 20
+            stop_loss = price * 1.015
+            target = price * 0.975
+        combined_score = technical_strength + sentiment_boost + min(news_count, 5)
+
+        # Tie-breaker quotidien : variation pseudo-aléatoire stable sur la journée
+        # (la même journée donne le même ordre, mais l'ordre change chaque jour).
+        rotation_bonus = ((hash(item['ticker']) ^ daily_seed) % 1000) / 1000.0
+
+        opportunities.append({
+            'ticker': item['ticker'],
+            'name': item.get('name') or item['ticker'],
+            'direction': direction,
+            'entry': round(price, 2),
+            'stop_loss': round(stop_loss, 2),
+            'target': round(target, 2),
+            'technical_score': round(technical_score, 1),
+            'sentiment_score': round(sentiment_score, 2),
+            'news_count': news_count,
+            'signal': item.get('signal') or item.get('signal_strength'),
+            'rsi': item.get('rsi_14'),
+            'combined_score': round(combined_score, 1),
+            'last_updated': item.get('last_updated'),
+            '_rotation_bonus': rotation_bonus,
+            'devise': item.get('devise') or detect_currency_from_symbol(item['ticker'])
+        })
+
+    # Tri : score combiné d'abord, puis rotation quotidienne pour départager les scores proches.
+    opportunities.sort(key=lambda x: (x['combined_score'], x['_rotation_bonus']), reverse=True)
+    for opp in opportunities:
+        opp.pop('_rotation_bonus', None)
+
+    top = opportunities[:limit]
+
+    # Enrichissement : dividende (rendement %, valeur par action) et PER
+    if top:
+        tickers_top = [opp['ticker'] for opp in top]
+        fundamentals = get_fundamentals_for_tickers(tickers_top)
+        for opp in top:
+            f = fundamentals.get(opp['ticker'].upper(), {})
+            opp['dividend_yield'] = f.get('dividend_yield')
+            opp['dividend_rate'] = f.get('dividend_rate')
+            opp['trailing_pe'] = f.get('trailing_pe')
+            opp['forward_pe'] = f.get('forward_pe')
+        # Déclenche un rafraîchissement async des fondamentaux (cache 24h).
+        try:
+            trigger_fundamentals_refresh_async(tickers_top, max_age_hours=24)
+        except Exception as e:
+            print(f"trigger_fundamentals_refresh_async: {e}")
+
+    return top
+
+
+def build_intraday_prompt_with_context(opportunities):
+    today = datetime.now().strftime('%d/%m/%Y')
+    update_time = datetime.now().strftime('%H:%M')
+    prompt = INTRADAY_BULLETIN_PROMPT.replace('{DATE}', f'{today} — mise à jour {update_time}')
+    if not opportunities:
+        return prompt
+
+    lines = [
+        "",
+        "---",
+        "",
+        "Données internes monpecule.fr à prendre en compte pour sélectionner les signaux :"
+    ]
+    for opp in opportunities[:6]:
+        # Fondamentaux (peuvent être None si yfinance n'a pas la donnée)
+        dy = opp.get('dividend_yield')
+        dr = opp.get('dividend_rate')
+        tpe = opp.get('trailing_pe') or opp.get('forward_pe')
+        if dy is not None and dy > 0:
+            if dr is not None and dr > 0:
+                div_str = f"dividende {dy:.2f}% ({dr:.2f} {opp['devise']}/action)"
+            else:
+                div_str = f"dividende {dy:.2f}%"
+        else:
+            div_str = "pas de dividende"
+        per_str = f"PER {tpe:.1f}" if tpe is not None and tpe > 0 else "PER N/A"
+
+        lines.append(
+            f"- {opp['name']} ({opp['ticker']}) : {opp['direction']}, entrée {opp['entry']} {opp['devise']}, "
+            f"stop-loss {opp['stop_loss']} {opp['devise']}, objectif {opp['target']} {opp['devise']}, "
+            f"score technique {opp['technical_score']}/100, sentiment news {opp['sentiment_score']}, "
+            f"{opp['news_count']} news récentes, {div_str}, {per_str}."
+        )
+    lines.append("")
+    lines.append("Sélectionne seulement les 2 à 3 meilleures opportunités et explique clairement pourquoi.")
+    return prompt + "\n".join(lines)
+
+
+def send_email(subject, text_body, html_body=None, to_email=None):
+    """Envoie un email via SMTP configuré par variables d'environnement."""
+    if not SMTP_HOST or not SMTP_FROM:
+        raise RuntimeError("SMTP non configuré : définir SMTP_HOST, SMTP_USER/SMTP_FROM et SMTP_PASSWORD")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email or INTRADAY_EMAIL_TO
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
+        smtp.starttls()
+        if SMTP_USER and SMTP_PASSWORD:
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+        smtp.send_message(msg)
+
+
+def refresh_cac40_trading_signals():
+    """Recalcule les signaux techniques CAC 40 en synchrone pour les emails cron."""
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_ticker = {
+            executor.submit(analyze_ticker_technical, ticker, EODHD_API_KEY, TICKER_NAMES_MAP): ticker
+            for ticker in CAC40_TICKERS
+        }
+        for future in concurrent.futures.as_completed(future_to_ticker):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception as e:
+                print(f"Erreur signal CAC40: {e}")
+
+    if not results:
+        return 0
+
+    conn = get_connection()
+    now = datetime.now().strftime('%d/%m/%Y à %H:%M')
+    for r in results:
+        conn.execute('''REPLACE INTO trading_signals
+                       (ticker, name, rsi_14, sma_20, sma_50, ema_12, ema_26,
+                        bb_upper, bb_middle, bb_lower, macd, macd_signal,
+                        current_price, previous_close, technical_score,
+                        signal, signal_class, signal_strength,
+                        rsi_score, ma_score, bb_score, macd_score,
+                        last_updated, devise, data_points)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (r['ticker'], r['name'], r['rsi_14'], r['sma_20'], r['sma_50'],
+                      r['ema_12'], r['ema_26'], r['bb_upper'], r['bb_middle'], r['bb_lower'],
+                      r['macd'], r['macd_signal'], r['current_price'], r['previous_close'],
+                      r['technical_score'], r['signal'], r['signal_class'], r['signal_strength'],
+                      r['rsi_score'], r['ma_score'], r['bb_score'], r['macd_score'],
+                      now, r['devise'], r['data_points']))
+    conn.commit()
+    conn.close()
+    return len(results)
+
+
+def save_morning_intraday_recommendations(opportunities):
+    today = datetime.now().strftime('%Y-%m-%d')
+    now = datetime.now().strftime('%H:%M')
+    created_at = datetime.now().isoformat(timespec='seconds')
+    conn = get_connection()
+    conn.execute('DELETE FROM intraday_email_recommendations WHERE sent_date = ?', (today,))
+    for opp in opportunities:
+        conn.execute('''INSERT INTO intraday_email_recommendations
+                        (sent_date, sent_time, ticker, name, direction, entry, stop_loss, target,
+                         technical_score, sentiment_score, news_count, devise, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (today, now, opp['ticker'], opp['name'], opp['direction'], opp['entry'],
+                      opp['stop_loss'], opp['target'], opp['technical_score'], opp['sentiment_score'],
+                      opp['news_count'], opp['devise'], created_at))
+    conn.commit()
+    conn.close()
+
+
+def build_morning_intraday_email(opportunities):
+    today = datetime.now().strftime('%d/%m/%Y')
+    rows = []
+    for opp in opportunities:
+        rows.append(
+            f"{opp['name']} ({opp['ticker']})\n"
+            f"Direction : {opp['direction']}\n"
+            f"Entrée : {opp['entry']} {opp['devise']} | Stop-loss : {opp['stop_loss']} {opp['devise']} | Objectif : {opp['target']} {opp['devise']}\n"
+            f"Score technique : {opp['technical_score']}/100 | Sentiment news : {opp['sentiment_score']} ({opp['news_count']} news)\n"
+        )
+    text = (
+        f"Bonjour,\n\n"
+        f"Voici les opportunités CAC 40 proposées pour la séance du {today} à 9h.\n\n"
+        + "\n".join(rows)
+        + "\nNote de risque : contenu éducatif, pas un conseil financier. Le trading peut entraîner des pertes.\n"
+    )
+    html_rows = "".join(
+        f"<tr><td><b>{opp['name']}</b><br><small>{opp['ticker']}</small></td>"
+        f"<td>{opp['direction']}</td><td>{opp['entry']} {opp['devise']}</td>"
+        f"<td>{opp['stop_loss']} {opp['devise']}</td><td>{opp['target']} {opp['devise']}</td>"
+        f"<td>{opp['technical_score']}/100<br><small>News {opp['sentiment_score']} · {opp['news_count']}</small></td></tr>"
+        for opp in opportunities
+    )
+    html = f"""
+    <h2>Opportunités CAC 40 du {today} - 9h</h2>
+    <table border="1" cellspacing="0" cellpadding="8" style="border-collapse:collapse;font-family:Arial,sans-serif;">
+      <tr><th>Actif</th><th>Direction</th><th>Entrée</th><th>Stop-loss</th><th>Objectif</th><th>Score</th></tr>
+      {html_rows}
+    </table>
+    <p><b>Note de risque :</b> contenu éducatif, pas un conseil financier. Le trading peut entraîner des pertes.</p>
+    """
+    return text, html
+
+
+def build_evening_intraday_email():
+    today_iso = datetime.now().strftime('%Y-%m-%d')
+    today_fr = datetime.now().strftime('%d/%m/%Y')
+    conn = get_connection()
+    rows = conn.execute('''
+        SELECT *
+        FROM intraday_email_recommendations
+        WHERE sent_date = ?
+        ORDER BY id
+    ''', (today_iso,)).fetchall()
+    conn.close()
+
+    if not rows:
+        text = f"Aucune recommandation CAC 40 du matin trouvée pour le {today_fr}."
+        return text, f"<p>{text}</p>", []
+
+    recap = []
+    for row in rows:
+        current_price, _name, _prev_close, currency = fetch_price_from_api(row['ticker'])
+        current = safe_float(current_price)
+        entry = safe_float(row['entry'])
+        direction = row['direction']
+        if current > 0 and entry > 0:
+            perf_pct = ((current - entry) / entry) * 100
+            good = perf_pct > 0 if direction == 'Achat' else perf_pct < 0
+            move_text = f"{perf_pct:+.2f}%"
+        else:
+            good = False
+            move_text = "N/A"
+        recap.append({
+            'name': row['name'],
+            'ticker': row['ticker'],
+            'direction': direction,
+            'entry': entry,
+            'current': round(current, 2) if current else None,
+            'devise': currency or row['devise'],
+            'move_text': move_text,
+            'good': good,
+            'result': 'Bonne' if good else 'Pas validée'
+        })
+
+    good_count = sum(1 for item in recap if item['good'])
+    text_lines = [
+        f"Bonsoir,\n\nRécap des opportunités CAC 40 envoyées ce matin ({today_fr}).",
+        f"Résultat : {good_count}/{len(recap)} signal(aux) dans le bon sens.\n"
+    ]
+    for item in recap:
+        text_lines.append(
+            f"{item['result']} — {item['name']} ({item['ticker']}) : {item['direction']}, "
+            f"entrée {item['entry']} {item['devise']}, cours 17h {item['current']} {item['devise']}, "
+            f"variation {item['move_text']}."
+        )
+    text_lines.append("\nNote : récap éducatif basé sur le prix disponible à 17h, pas un conseil financier.")
+
+    html_rows = "".join(
+        f"<tr><td>{'✅' if item['good'] else '⚠️'} {item['result']}</td>"
+        f"<td><b>{item['name']}</b><br><small>{item['ticker']}</small></td>"
+        f"<td>{item['direction']}</td><td>{item['entry']} {item['devise']}</td>"
+        f"<td>{item['current']} {item['devise']}</td><td>{item['move_text']}</td></tr>"
+        for item in recap
+    )
+    html = f"""
+    <h2>Récap CAC 40 du {today_fr} - 17h</h2>
+    <p><b>Résultat :</b> {good_count}/{len(recap)} signal(aux) dans le bon sens.</p>
+    <table border="1" cellspacing="0" cellpadding="8" style="border-collapse:collapse;font-family:Arial,sans-serif;">
+      <tr><th>Verdict</th><th>Actif</th><th>Direction</th><th>Entrée</th><th>Cours 17h</th><th>Variation</th></tr>
+      {html_rows}
+    </table>
+    <p><b>Note :</b> récap éducatif basé sur le prix disponible à 17h, pas un conseil financier.</p>
+    """
+    return "\n".join(text_lines), html, recap
 
 # =============================================================================
 # TECHNICAL ANALYSIS ENGINE - Trading Signals
@@ -1518,38 +2367,408 @@ def analyze_etf_trend(ticker, api_key, realtime_url, ticker_names):
 
 @app.route('/conseil-du-jour')
 def conseil_du_jour():
-    """Affiche l'analyse de sentiment depuis la base de données"""
-    if 'user_id' not in session: 
+    """Affiche l'analyse de sentiment depuis la base de données.
+
+    Enrichit chaque ticker avec son dividende (% et valeur) et son PER
+    depuis la table ticker_fundamentals (rafraîchi en arrière-plan).
+    """
+    if 'user_id' not in session:
         return redirect(url_for('index'))
-    
+
     conn = get_connection()
-    # Lire les résultats depuis la base de données
     results_db = conn.execute('SELECT * FROM market_analysis ORDER BY score DESC').fetchall()
     conn.close()
-    
-    # Si pas de résultats ou trop vieux (> 4h), proposer une mise à jour
+
     last_update = "Jamais"
     if results_db:
         last_update = results_db[0]['last_updated']
-        # Convertir en objet datetime pour comparaison si besoin
-    
-    # Convertir en liste de dicts
+
     results = [dict(row) for row in results_db]
-    
-    # Statistiques
+
+    # Enrichissement dividende + PER pour toutes les valeurs affichées
+    if results:
+        tickers = [r['ticker'] for r in results if r.get('ticker')]
+        fundamentals = get_fundamentals_for_tickers(tickers)
+        for r in results:
+            f = fundamentals.get((r.get('ticker') or '').upper(), {})
+            r['dividend_yield'] = f.get('dividend_yield')
+            r['dividend_rate'] = f.get('dividend_rate')
+            r['trailing_pe'] = f.get('trailing_pe')
+            r['forward_pe'] = f.get('forward_pe')
+            r['fundamentals_currency'] = f.get('currency')
+
+        # Rafraîchit en arrière-plan les tickers absents ou périmés (> 24h)
+        try:
+            trigger_fundamentals_refresh_async(tickers, max_age_hours=24)
+        except Exception as e:
+            print(f"trigger_fundamentals_refresh_async (conseil): {e}")
+
     achats = sum(1 for r in results if r['signal'] == "🟢 ACHAT")
     ventes = sum(1 for r in results if r['signal'] == "🔴 VENTE")
     neutres = sum(1 for r in results if r['signal'] == "🟡 NEUTRE")
-    
+
     data = {
         'results': results,
         'achats': achats,
         'ventes': ventes,
         'neutres': neutres,
-        'date_maj': last_update
+        'date_maj': last_update,
     }
-    
+
     return render_template('conseil.html', **data)
+
+
+def build_portfolio_recommendations(user_id, user_devise='EUR'):
+    """Pour chaque actif du portefeuille de l'utilisateur, croise les signaux
+    techniques (table trading_signals) et de sentiment news (market_analysis)
+    avec la plus-value courante pour proposer une action.
+
+    Actions possibles :
+      - VENDRE_FORT      : signal technique très négatif + sentiment baissier
+      - VENDRE           : signal négatif ou survente confirmée
+      - ALLEGER          : prise de bénéfice (PV > 20%) avec signal au mieux neutre
+      - COUPER_PERTE     : perte importante (< -15%) sans signal positif fort
+      - RENFORCER        : signal très positif + sentiment positif
+      - CONSERVER        : aucun signal d'action
+
+    Retourne une liste d'actifs enrichis triée par sell_score décroissant.
+    """
+    conn = get_connection()
+    try:
+        actifs_rows = conn.execute('''
+            SELECT a.*, c.nom_compte
+            FROM actifs a
+            JOIN comptes c ON a.compte_id = c.id
+            WHERE c.user_id = ?
+        ''', (user_id,)).fetchall()
+
+        signal_rows = conn.execute('SELECT * FROM trading_signals').fetchall()
+        signals = {row['ticker'].upper(): dict(row) for row in signal_rows}
+
+        sentiment_rows = conn.execute('SELECT ticker, score, nb_news, signal FROM market_analysis').fetchall()
+        sentiments = {row['ticker'].upper(): dict(row) for row in sentiment_rows}
+    finally:
+        conn.close()
+
+    # action_order : ordre d'affichage demandé
+    #   1. Couper perte (le plus urgent à arbitrer)
+    #   2. Vendre fort, puis vendre
+    #   3. Alléger
+    #   4. Renforcer
+    #   5. Conserver
+    actions_meta = {
+        'COUPER_PERTE':  ('🟠 Couper la perte',  'action-couper',      1),
+        'VENDRE_FORT':   ('🔴 Vendre rapidement', 'action-vendre-fort', 2),
+        'VENDRE':        ('🟠 Vendre',           'action-vendre',      3),
+        'ALLEGER':       ('🟡 Alléger (prendre bénéfice)', 'action-alleger', 4),
+        'RENFORCER':     ('🟢 Renforcer',        'action-renforcer',   5),
+        'CONSERVER':     ('⚪ Conserver',         'action-conserver',   6),
+    }
+
+    recommendations = []
+    for a in actifs_rows:
+        ticker = (a['ticker_isin'] or '').upper().strip()
+        if not ticker:
+            continue
+
+        # Données portefeuille
+        p_actuel = safe_float(a['prix_actuel'])
+        p_achat = safe_float(a['prix_achat'])
+        quantite = safe_int(a['quantite'])
+        try:
+            devise_cot = a['devise_cotation'] or 'EUR'
+        except (KeyError, IndexError):
+            devise_cot = 'EUR'
+
+        valeur_actuelle = p_actuel * quantite
+        valeur_achat = p_achat * quantite
+        pv_pct = ((p_actuel - p_achat) / p_achat * 100) if p_achat > 0 else 0
+        pv_eur = convert_currency(valeur_actuelle - valeur_achat, devise_cot, 'EUR')
+        val_actuelle_user = convert_currency(valeur_actuelle, devise_cot, user_devise)
+
+        # Signaux : recherche exacte puis sur le ticker court (avant le ".")
+        sig = signals.get(ticker) or signals.get(ticker.split('.')[0])
+        sent = sentiments.get(ticker) or sentiments.get(ticker.split('.')[0])
+
+        technical_score = safe_float(sig.get('technical_score'), 50) if sig else 50
+        rsi_14 = safe_float(sig.get('rsi_14'), 50) if sig else 50
+        signal_strength = (sig.get('signal_strength') or '').upper() if sig else ''
+        sig_label = (sig.get('signal') if sig else '') or ''
+
+        sentiment_score = safe_float(sent.get('score'), 0.5) if sent else 0.5
+        nb_news = safe_int(sent.get('nb_news'), 0) if sent else 0
+        sentiment_label = (sent.get('signal') if sent else '') or ''
+
+        # Score de vente : 100 = vente forte, 0 = conserver/acheter
+        sell_score = (
+            (100 - technical_score) * 0.50
+            + (1 - sentiment_score) * 100 * 0.30
+            + max(0, rsi_14 - 50) * 2 * 0.20
+        )
+        if pv_pct > 25:
+            sell_score += 8
+        elif pv_pct > 15:
+            sell_score += 4
+        if pv_pct < -15:
+            sell_score += 6
+
+        # Décision (priorité descendante)
+        action = 'CONSERVER'
+        reasons = []
+
+        is_strong_sell = signal_strength == 'VENTE FORTE'
+        is_sell = signal_strength in ('VENTE', 'VENTE FORTE')
+        is_strong_buy = signal_strength == 'ACHAT FORT'
+        is_buy = signal_strength in ('ACHAT', 'ACHAT FORT')
+
+        if is_strong_sell or (rsi_14 >= 75 and sentiment_score < 0.45):
+            action = 'VENDRE_FORT'
+        elif is_sell or (rsi_14 >= 70 and sentiment_score < 0.5) or (technical_score < 30 and sentiment_score < 0.45):
+            action = 'VENDRE'
+        elif pv_pct >= 20 and (is_sell or rsi_14 >= 65 or sentiment_score < 0.45):
+            action = 'ALLEGER'
+        elif pv_pct <= -15 and not is_strong_buy and sentiment_score < 0.55:
+            action = 'COUPER_PERTE'
+        elif is_strong_buy and sentiment_score >= 0.55:
+            action = 'RENFORCER'
+        else:
+            action = 'CONSERVER'
+
+        # Justifications
+        if sig:
+            if signal_strength:
+                reasons.append(f"Signal technique : {signal_strength.title()} (score {technical_score:.0f}/100)")
+            if rsi_14 >= 70:
+                reasons.append(f"RSI surcheté à {rsi_14:.0f}")
+            elif rsi_14 <= 30:
+                reasons.append(f"RSI survendu à {rsi_14:.0f}")
+        else:
+            reasons.append("Pas d'analyse technique disponible (lancer Analyse Technique)")
+
+        if sent and nb_news > 0:
+            polarity_pct = (sentiment_score - 0.5) * 200  # -100 → +100
+            if polarity_pct <= -15:
+                reasons.append(f"Sentiment news négatif ({polarity_pct:+.0f} sur {nb_news} news)")
+            elif polarity_pct >= 15:
+                reasons.append(f"Sentiment news positif ({polarity_pct:+.0f} sur {nb_news} news)")
+            else:
+                reasons.append(f"Sentiment news neutre ({nb_news} news récentes)")
+
+        if pv_pct >= 20:
+            reasons.append(f"Plus-value latente confortable ({pv_pct:+.1f}%) → prise de bénéfice envisageable")
+        elif pv_pct <= -15:
+            reasons.append(f"Moins-value latente importante ({pv_pct:+.1f}%) → couper la perte ?")
+
+        action_label, action_class, action_order = actions_meta[action]
+
+        # Clé secondaire intra-catégorie (du plus urgent au moins urgent) :
+        #   COUPER_PERTE : PV la plus négative en premier
+        #   VENDRE_FORT/VENDRE : sell_score le plus élevé en premier
+        #   ALLEGER      : PV la plus élevée en premier (verrouille gain max)
+        #   RENFORCER    : sell_score le plus bas en premier (= signal d'achat le plus fort)
+        #   CONSERVER    : sell_score décroissant pour rester cohérent
+        if action == 'COUPER_PERTE':
+            secondary = pv_pct  # plus négatif = priorité (tri croissant)
+        elif action == 'ALLEGER':
+            secondary = -pv_pct  # plus haut = priorité (tri croissant après négation)
+        elif action == 'RENFORCER':
+            secondary = sell_score  # plus bas = priorité (tri croissant)
+        else:
+            secondary = -sell_score  # plus haut = priorité (tri croissant après négation)
+
+        recommendations.append({
+            'id': a['id'],
+            'compte': a['nom_compte'],
+            'name': a['nom_actif'],
+            'ticker': ticker,
+            'quantite': quantite,
+            'prix_achat': round(p_achat, 4),
+            'prix_actuel': round(p_actuel, 4),
+            'devise_cotation': devise_cot,
+            'pv_pct': round(pv_pct, 2),
+            'pv_eur': round(pv_eur, 2),
+            'val_actuelle_user': round(val_actuelle_user, 2),
+            'technical_score': round(technical_score, 1) if sig else None,
+            'rsi_14': round(rsi_14, 1) if sig else None,
+            'signal_strength': sig.get('signal_strength') if sig else None,
+            'signal_label': sig_label,
+            'sentiment_score': round(sentiment_score, 2) if sent else None,
+            'sentiment_label': sentiment_label,
+            'nb_news': nb_news,
+            'has_signal': bool(sig),
+            'has_sentiment': bool(sent),
+            'sell_score': round(sell_score, 1),
+            'action': action,
+            'action_label': action_label,
+            'action_class': action_class,
+            'action_order': action_order,
+            '_secondary': secondary,
+            'reasons': reasons,
+        })
+
+    recommendations.sort(key=lambda x: (x['action_order'], x['_secondary']))
+    for r in recommendations:
+        r.pop('_secondary', None)
+    return recommendations
+
+
+@app.route('/conseil-portefeuille')
+def conseil_portefeuille():
+    """Page qui propose une action (vendre/alléger/conserver/renforcer) sur
+    chaque actif du portefeuille à partir des signaux techniques et news.
+
+    Rafraîchit automatiquement les signaux techniques quand ils sont périmés
+    (plus de 4 h ou date différente) en réutilisant le même mécanisme que la
+    page Opportunités Intraday.
+    """
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+
+    now = datetime.now()
+    force_refresh = request.args.get('refresh') == '1'
+
+    count, last_updated_str, last_updated_dt = get_trading_signals_freshness()
+    is_stale = True
+    if last_updated_dt is not None and count > 0:
+        same_day = last_updated_dt.date() == now.date()
+        recent = (now - last_updated_dt).total_seconds() < 4 * 3600
+        is_stale = not (same_day and recent)
+
+    refresh_launched = False
+    if force_refresh or is_stale:
+        refresh_launched = trigger_trading_signals_refresh_async()
+
+    # Récupérer la devise préférée de l'utilisateur
+    conn = get_connection()
+    user_info = conn.execute('SELECT devise FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    conn.close()
+    user_devise = user_info['devise'] if user_info and user_info['devise'] else 'EUR'
+    currency_symbol = CURRENCY_SYMBOLS.get(user_devise, '€')
+
+    recommendations = build_portfolio_recommendations(session['user_id'], user_devise=user_devise)
+
+    # Statistiques d'ensemble
+    counters = {'VENDRE_FORT': 0, 'VENDRE': 0, 'ALLEGER': 0, 'COUPER_PERTE': 0, 'RENFORCER': 0, 'CONSERVER': 0}
+    for r in recommendations:
+        counters[r['action']] = counters.get(r['action'], 0) + 1
+
+    return render_template(
+        'conseil_portefeuille.html',
+        recommendations=recommendations,
+        counters=counters,
+        signals_last_updated=last_updated_str,
+        is_stale=is_stale,
+        refresh_launched=refresh_launched,
+        signals_running=_signals_refresh_running,
+        date_seance=now.strftime('%d/%m/%Y'),
+        heure_maj=now.strftime('%H:%M'),
+        user_devise=user_devise,
+        currency_symbol=currency_symbol,
+        user_nom=session.get('user_nom'),
+    )
+
+
+@app.route('/opportunites-intraday')
+def opportunites_intraday():
+    """Page de sélection des meilleures opportunités intraday + prompt IA.
+
+    Vérifie automatiquement la fraîcheur des signaux et lance un recalcul
+    asynchrone (CAC 40 + portefeuille utilisateur) si les données sont
+    périmées (autre jour, ou plus de 4 heures).
+    """
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+
+    now = datetime.now()
+    force_refresh = request.args.get('refresh') == '1'
+
+    count, last_updated_str, last_updated_dt = get_trading_signals_freshness()
+    is_stale = True
+    if last_updated_dt is not None and count > 0:
+        same_day = last_updated_dt.date() == now.date()
+        recent = (now - last_updated_dt).total_seconds() < 4 * 3600
+        is_stale = not (same_day and recent)
+
+    refresh_launched = False
+    if force_refresh or is_stale:
+        refresh_launched = trigger_trading_signals_refresh_async()
+
+    opportunities = build_intraday_opportunities(limit=6)
+    prompt = build_intraday_prompt_with_context(opportunities)
+
+    if last_updated_str:
+        freshness_label = f"Signaux mis à jour le {last_updated_str}"
+    else:
+        freshness_label = "Aucun signal en cache pour l'instant"
+
+    if refresh_launched:
+        refresh_status = (
+            "Recalcul lancé en arrière-plan sur le CAC 40 + ton portefeuille. "
+            "Rafraîchis la page dans 1 à 2 minutes pour voir la sélection du jour."
+        )
+    elif _signals_refresh_running:
+        refresh_status = "Analyse technique déjà en cours, rafraîchis dans 1 à 2 minutes."
+    else:
+        refresh_status = None
+
+    return render_template(
+        'opportunites_intraday.html',
+        opportunities=opportunities,
+        prompt=prompt,
+        date_seance=now.strftime('%d/%m/%Y'),
+        heure_maj=now.strftime('%H:%M'),
+        freshness_label=freshness_label,
+        refresh_status=refresh_status,
+        is_stale=is_stale,
+        signals_count=count,
+    )
+
+
+@app.route('/api/cron/intraday_email/<moment>')
+def cron_intraday_email(moment):
+    """Envoie l'email intraday CAC 40 du matin ou le récap du soir."""
+    if 'user_id' not in session and request.args.get('token') != CRON_TOKEN:
+        return jsonify({'error': 'Non autorisé'}), 401
+
+    moment = moment.lower().strip()
+    if moment not in ['morning', 'evening']:
+        return jsonify({'error': 'Moment invalide. Utiliser morning ou evening.'}), 400
+
+    try:
+        if moment == 'morning':
+            refreshed = refresh_cac40_trading_signals()
+            opportunities = build_intraday_opportunities(limit=3, tickers=CAC40_TICKERS)
+            if not opportunities:
+                return jsonify({
+                    'success': False,
+                    'message': 'Aucune opportunité CAC 40 exploitable après recalcul.',
+                    'refreshed': refreshed
+                }), 200
+
+            save_morning_intraday_recommendations(opportunities)
+            text_body, html_body = build_morning_intraday_email(opportunities)
+            subject = f"MonPecule - Opportunités CAC 40 du {datetime.now().strftime('%d/%m/%Y')} à 9h"
+            send_email(subject, text_body, html_body)
+            return jsonify({
+                'success': True,
+                'sent_to': INTRADAY_EMAIL_TO,
+                'moment': 'morning',
+                'refreshed': refreshed,
+                'opportunities': opportunities
+            })
+
+        text_body, html_body, recap = build_evening_intraday_email()
+        subject = f"MonPecule - Récap CAC 40 du {datetime.now().strftime('%d/%m/%Y')} à 17h"
+        send_email(subject, text_body, html_body)
+        return jsonify({
+            'success': True,
+            'sent_to': INTRADAY_EMAIL_TO,
+            'moment': 'evening',
+            'recap': recap
+        })
+    except Exception as e:
+        print(f"Erreur email intraday {moment}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/update_market_analysis')
 def update_market_analysis():
@@ -1640,84 +2859,32 @@ def check_analysis_status():
 
 @app.route('/api/update_trading_signals')
 def update_trading_signals():
+    """Analyse technique d'un univers élargi (CAC 40 + portefeuille utilisateur).
+
+    Authentification : session utilisateur OU token CRON.
+    Le calcul est exécuté en arrière-plan pour ne pas bloquer la requête.
     """
-    Background analysis of user's assets with technical indicators
-    Requires user session OR CRON token authentication
-    """
-    # Allow if user is logged in OR if valid CRON token is provided
     if 'user_id' not in session and request.args.get('token') != CRON_TOKEN:
         return jsonify({'error': 'Non autorisé'}), 401
 
-    def run_update():
-        conn = get_connection()
+    universe, ticker_names = build_intraday_universe()
+    if not universe:
+        return jsonify({
+            'success': False,
+            'message': 'Aucun ticker à analyser (portefeuille vide et CAC 40 indisponible).'
+        })
 
-        # Get all unique tickers from user's portfolio
-        user_tickers = set()
-        user_actifs = conn.execute(
-            'SELECT DISTINCT ticker_isin, nom_actif FROM actifs WHERE ticker_isin != ""'
-        ).fetchall()
-
-        ticker_names = {}
-        for actif in user_actifs:
-            t = actif['ticker_isin'].upper()
-            user_tickers.add(t)
-            ticker_names[t] = actif['nom_actif']
-
-        if not user_tickers:
-            print("No tickers to analyze")
-            conn.close()
-            return
-
-        print(f"Starting technical analysis for {len(user_tickers)} tickers")
-
-        # Parallel execution with 10 workers (EODHD can handle moderate concurrency)
-        results_to_save = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_ticker = {
-                executor.submit(analyze_ticker_technical, t, EODHD_API_KEY, ticker_names): t
-                for t in user_tickers
-            }
-
-            for future in concurrent.futures.as_completed(future_to_ticker):
-                try:
-                    res = future.result()
-                    if res:
-                        results_to_save.append(res)
-                except Exception as e:
-                    print(f"Future error: {e}")
-
-        # Save to database
-        now = datetime.now().strftime('%d/%m/%Y à %H:%M')
-        conn.execute('DELETE FROM trading_signals')
-
-        for r in results_to_save:
-            conn.execute('''INSERT INTO trading_signals
-                           (ticker, name, rsi_14, sma_20, sma_50, ema_12, ema_26,
-                            bb_upper, bb_middle, bb_lower, macd, macd_signal,
-                            current_price, previous_close, technical_score,
-                            signal, signal_class, signal_strength,
-                            rsi_score, ma_score, bb_score, macd_score,
-                            last_updated, devise, data_points)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (r['ticker'], r['name'], r['rsi_14'], r['sma_20'], r['sma_50'],
-                         r['ema_12'], r['ema_26'], r['bb_upper'], r['bb_middle'], r['bb_lower'],
-                         r['macd'], r['macd_signal'], r['current_price'], r['previous_close'],
-                         r['technical_score'], r['signal'], r['signal_class'], r['signal_strength'],
-                         r['rsi_score'], r['ma_score'], r['bb_score'], r['macd_score'],
-                         now, r['devise'], r['data_points']))
-
-        conn.commit()
-        conn.close()
-        print(f"Technical analysis completed: {len(results_to_save)} tickers saved")
-
-    # Launch in background thread
-    thread = threading.Thread(target=run_update)
-    thread.daemon = True
-    thread.start()
-
+    launched = trigger_trading_signals_refresh_async(universe, ticker_names)
     return jsonify({
         'success': True,
-        'message': 'Analyse technique lancée. Rafraîchissez dans quelques minutes.'
+        'launched': launched,
+        'tickers': len(universe),
+        'message': (
+            f"Analyse technique lancée sur {len(universe)} tickers (CAC 40 + portefeuille). "
+            "Rafraîchissez la page dans 1 à 2 minutes."
+            if launched else
+            "Une analyse technique est déjà en cours. Rafraîchissez dans 1 à 2 minutes."
+        )
     })
 
 @app.route('/api/check_trading_status')
@@ -2268,119 +3435,142 @@ def get_historique(actif_id):
                       for h in historique]
     })
 
+# --- État global pour la mise à jour des prix (anti-doublon) ---
+_prices_refresh_lock = threading.Lock()
+# user_id (int) ou 'cron' -> datetime de démarrage
+_prices_refresh_state = {}
+
+
+def _run_prices_update(user_id, is_cron, cumul_actif):
+    """Exécute la mise à jour des prix (utilisée par /api/update_prices et l'auto-refresh)."""
+    try:
+        conn = get_connection()
+        if is_cron:
+            actifs_db = conn.execute('''SELECT a.id, a.compte_id, UPPER(a.ticker_isin) as ticker, c.user_id
+                                     FROM actifs a
+                                     JOIN comptes c ON a.compte_id=c.id
+                                     WHERE a.ticker_isin != ""''').fetchall()
+        else:
+            actifs_db = conn.execute('''SELECT a.id, a.compte_id, UPPER(a.ticker_isin) as ticker, c.user_id
+                                     FROM actifs a
+                                     JOIN comptes c ON a.compte_id=c.id
+                                     WHERE c.user_id=? AND a.ticker_isin != ""''', (user_id,)).fetchall()
+
+        updated = 0
+        date_actuelle = datetime.now().strftime("%Y-%m-%d")
+        mois_actuel = datetime.now().strftime("%Y-%m")
+        heure_actuelle = datetime.now().strftime("%d/%m %H:%M")
+
+        print(f"DEBUG: Debut mise a jour pour {len(actifs_db)} titres (user={user_id}, cron={is_cron})")
+        for row in actifs_db:
+            actif_info = conn.execute(
+                'SELECT prix_actuel, prix_veille, quantite, frais, devise_cotation FROM actifs WHERE id = ?',
+                (row['id'],)
+            ).fetchone()
+
+            ancien_prix = safe_float(actif_info['prix_actuel'])
+            quantite = safe_int(actif_info['quantite'])
+
+            p, n, pv, currency = fetch_price_from_api(row['ticker'])
+            if p is not None:
+                if pv and float(pv) > 0:
+                    nouveau_prix_veille = float(pv)
+                elif ancien_prix > 0:
+                    nouveau_prix_veille = ancien_prix
+                else:
+                    nouveau_prix_veille = float(p)
+
+                pv_jour = (float(p) - nouveau_prix_veille) * quantite
+                pv_jour_eur = convert_currency(pv_jour, currency, 'EUR')
+
+                if cumul_actif:
+                    cumul_existant = conn.execute(
+                        'SELECT id, cumul_pv, derniere_mise_a_jour FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
+                        (row['id'], mois_actuel)
+                    ).fetchone()
+                    if cumul_existant:
+                        derniere_maj = cumul_existant['derniere_mise_a_jour']
+                        if derniere_maj != date_actuelle:
+                            nouveau_cumul = cumul_existant['cumul_pv'] + pv_jour_eur
+                            conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
+                                       (nouveau_cumul, date_actuelle, cumul_existant['id']))
+                    else:
+                        conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
+                                   (row['id'], mois_actuel, pv_jour_eur, date_actuelle))
+
+                conn.execute('UPDATE actifs SET prix_actuel = ?, prix_veille = ?, devise_cotation = ? WHERE id = ?',
+                           (float(p), nouveau_prix_veille, currency, row['id']))
+
+                existing = conn.execute(
+                    'SELECT id FROM historique_prix WHERE actif_id = ? AND date = ?',
+                    (row['id'], date_actuelle)
+                ).fetchone()
+                if existing:
+                    conn.execute('UPDATE historique_prix SET prix = ?, devise = ? WHERE id = ?',
+                               (float(p), currency, existing['id']))
+                else:
+                    conn.execute('INSERT INTO historique_prix (actif_id, date, prix, devise) VALUES (?, ?, ?, ?)',
+                               (row['id'], date_actuelle, float(p), currency))
+
+                updated += 1
+                print(f"DEBUG: Mis a jour {row['ticker']} -> {p} {currency}")
+
+        if is_cron:
+            conn.execute('UPDATE users SET derniere_maj = ? WHERE id IN (SELECT DISTINCT c.user_id FROM comptes c)',
+                        (heure_actuelle,))
+        else:
+            conn.execute('UPDATE users SET derniere_maj = ? WHERE id = ?',
+                        (heure_actuelle, user_id))
+
+        conn.commit()
+        conn.close()
+        print(f"DEBUG: Mise a jour terminee, {updated} actifs mis a jour")
+    except Exception as e:
+        print(f"DEBUG: Erreur _run_prices_update: {e}")
+    # NB: on conserve le timestamp dans _prices_refresh_state pour faire respecter
+    # le min_interval_seconds (anti-doublon) entre deux rafraîchissements.
+
+
+def trigger_prices_refresh_async(user_id, cumul=False, is_cron=False, min_interval_seconds=300, force=False):
+    """Lance en arrière-plan la mise à jour des prix d'un utilisateur (ou CRON).
+
+    Retourne (launched: bool, last_started_at: datetime|None).
+    Empêche un nouveau lancement si le dernier date de moins de min_interval_seconds.
+    """
+    key = 'cron' if is_cron else user_id
+    now = datetime.now()
+    with _prices_refresh_lock:
+        last = _prices_refresh_state.get(key)
+        if last is not None and not force:
+            elapsed = (now - last).total_seconds()
+            if elapsed < min_interval_seconds:
+                return False, last
+        _prices_refresh_state[key] = now
+
+    thread = threading.Thread(
+        target=_run_prices_update,
+        args=(user_id, is_cron, cumul),
+        daemon=True,
+    )
+    thread.start()
+    return True, now
+
+
 @app.route('/api/update_prices')
 def update_prices():
-    # Vérifier l'authentification : soit session utilisateur, soit token CRON
+    """Endpoint manuel/CRON pour rafraîchir les prix (toujours en arrière-plan)."""
     cron_token = request.args.get('token')
     is_cron = (cron_token == CRON_TOKEN)
     cumul_actif = request.args.get('cumul') == 'true'
-    
+
     if not is_cron and 'user_id' not in session:
         return jsonify({'error': 'Non connecte'}), 401
-    
-    # Capturer les valeurs AVANT le thread (session n'est pas accessible dans le thread)
-    is_cron_thread = is_cron
-    cumul_actif_thread = cumul_actif
-    user_id_thread = session.get('user_id') if not is_cron else None
-    
-    # Définir la fonction de mise à jour (utilisée pour CRON et utilisateur)
-    def update_in_background():
-            conn = get_connection()
-            # Si c'est un appel utilisateur, filtrer par user_id
-            if is_cron_thread:
-                actifs_db = conn.execute('''SELECT a.id, a.compte_id, UPPER(a.ticker_isin) as ticker, c.user_id 
-                                         FROM actifs a 
-                                         JOIN comptes c ON a.compte_id=c.id 
-                                         WHERE a.ticker_isin != ""''').fetchall()
-            else:
-                actifs_db = conn.execute('''SELECT a.id, a.compte_id, UPPER(a.ticker_isin) as ticker, c.user_id 
-                                         FROM actifs a 
-                                         JOIN comptes c ON a.compte_id=c.id 
-                                         WHERE c.user_id=? AND a.ticker_isin != ""''', (user_id_thread,)).fetchall()
-            
-            updated = 0
-            date_actuelle = datetime.now().strftime("%Y-%m-%d")
-            mois_actuel = datetime.now().strftime("%Y-%m")
-            heure_actuelle = datetime.now().strftime("%d/%m %H:%M")
-            
-            print(f"DEBUG: Debut mise a jour pour {len(actifs_db)} titres")
-            for row in actifs_db:
-                actif_info = conn.execute(
-                    'SELECT prix_actuel, prix_veille, quantite, frais, devise_cotation FROM actifs WHERE id = ?',
-                    (row['id'],)
-                ).fetchone()
-                
-                ancien_prix = safe_float(actif_info['prix_actuel'])
-                prix_veille_actuel = safe_float(actif_info['prix_veille'])
-                quantite = safe_int(actif_info['quantite'])
-                frais = safe_float(actif_info['frais'])
-                
-                p, n, pv, currency = fetch_price_from_api(row['ticker'])
-                if p is not None:
-                    # Toujours utiliser le previousClose de l'API comme prix de veille
-                    # (variation depuis la clôture d'hier, cohérente CRON + manuel)
-                    if pv and float(pv) > 0:
-                        nouveau_prix_veille = float(pv)
-                    elif ancien_prix > 0:
-                        nouveau_prix_veille = ancien_prix
-                    else:
-                        nouveau_prix_veille = float(p)
-                    
-                    pv_jour = (float(p) - nouveau_prix_veille) * quantite
-                    pv_jour_eur = convert_currency(pv_jour, currency, 'EUR')
-                    
-                    if cumul_actif_thread:
-                        cumul_existant = conn.execute(
-                            'SELECT id, cumul_pv, derniere_mise_a_jour FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-                            (row['id'], mois_actuel)
-                        ).fetchone()
-                        
-                        if cumul_existant:
-                            derniere_maj = cumul_existant['derniere_mise_a_jour']
-                            if derniere_maj != date_actuelle:
-                                nouveau_cumul = cumul_existant['cumul_pv'] + pv_jour_eur
-                                conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
-                                           (nouveau_cumul, date_actuelle, cumul_existant['id']))
-                        else:
-                            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
-                                       (row['id'], mois_actuel, pv_jour_eur, date_actuelle))
-                    
-                    conn.execute('UPDATE actifs SET prix_actuel = ?, prix_veille = ?, devise_cotation = ? WHERE id = ?',
-                               (float(p), nouveau_prix_veille, currency, row['id']))
-                    
-                    existing = conn.execute(
-                        'SELECT id FROM historique_prix WHERE actif_id = ? AND date = ?',
-                        (row['id'], date_actuelle)
-                    ).fetchone()
-                    
-                    if existing:
-                        conn.execute('UPDATE historique_prix SET prix = ?, devise = ? WHERE id = ?',
-                                   (float(p), currency, existing['id']))
-                    else:
-                        conn.execute('INSERT INTO historique_prix (actif_id, date, prix, devise) VALUES (?, ?, ?, ?)',
-                                   (row['id'], date_actuelle, float(p), currency))
-                    
-                    updated += 1
-                    print(f"DEBUG: Mis a jour {row['ticker']} -> {p} {currency}")
-            
-            # Mettre à jour le timestamp uniquement pour les utilisateurs concernés
-            if is_cron_thread:
-                conn.execute('UPDATE users SET derniere_maj = ? WHERE id IN (SELECT DISTINCT c.user_id FROM comptes c)', 
-                            (heure_actuelle,))
-            else:
-                conn.execute('UPDATE users SET derniere_maj = ? WHERE id = ?', 
-                            (heure_actuelle, user_id_thread))
-            
-            conn.commit()
-            conn.close()
-            print(f"DEBUG: Mise a jour terminee, {updated} actifs mis a jour")
-    
-    # Lancer en arrière-plan pour TOUS les appels (CRON et utilisateur)
-    thread = threading.Thread(target=update_in_background)
-    thread.daemon = True
-    thread.start()
-    
-    # Répondre immédiatement
+
+    user_id = session.get('user_id') if not is_cron else None
+    # Force=True : l'appel manuel ne doit jamais être ignoré
+    trigger_prices_refresh_async(
+        user_id=user_id, cumul=cumul_actif, is_cron=is_cron, force=True
+    )
     return jsonify({'success': True, 'message': 'Mise a jour demarree en arriere-plan'})
 
 # --- ROUTE ETF ---

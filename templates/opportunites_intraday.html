@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Opportunités Intraday - MonPecule</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top left, rgba(22, 163, 74, 0.14), transparent 30%),
+                radial-gradient(circle at top right, rgba(37, 99, 235, 0.16), transparent 35%),
+                #f3f6fb;
+            color: #111827;
+        }
+        .page {
+            max-width: 1220px;
+            margin: 0 auto;
+            padding: 34px 20px 50px;
+        }
+        .hero {
+            background: #fff;
+            border: 1px solid rgba(17, 24, 39, 0.08);
+            border-radius: 26px;
+            padding: 28px;
+            box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+            align-items: flex-start;
+            margin-bottom: 24px;
+        }
+        .eyebrow {
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+            background: #ecfdf5;
+            color: #047857;
+            border: 1px solid #bbf7d0;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 0.82rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+        h1 { font-size: clamp(2rem, 4vw, 3.2rem); line-height: 1; letter-spacing: -0.04em; margin-bottom: 12px; }
+        .subtitle { color: #64748b; line-height: 1.55; max-width: 720px; }
+        .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+        .btn {
+            border: 0;
+            border-radius: 12px;
+            padding: 11px 16px;
+            font-weight: 800;
+            text-decoration: none;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: 0.18s ease;
+            white-space: nowrap;
+        }
+        .btn:hover { transform: translateY(-1px); }
+        .btn-primary { background: #111827; color: white; }
+        .btn-secondary { background: #e5e7eb; color: #111827; }
+        .btn-refresh { background: #2563eb; color: white; }
+        .grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(360px, 0.72fr);
+            gap: 22px;
+            align-items: start;
+        }
+        .panel {
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(17, 24, 39, 0.08);
+            border-radius: 22px;
+            box-shadow: 0 12px 34px rgba(15, 23, 42, 0.06);
+            overflow: hidden;
+        }
+        .panel-header {
+            padding: 20px 22px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+        .panel-header h2 { font-size: 1.15rem; }
+        .muted { color: #64748b; font-size: 0.9rem; }
+        .opportunity-list { padding: 18px; display: grid; gap: 14px; }
+        .opportunity-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 18px;
+            padding: 16px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+        .card-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+        .rank {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            display: grid;
+            place-items: center;
+            background: #111827;
+            color: #fff;
+            font-weight: 900;
+            flex: 0 0 auto;
+        }
+        .name { font-weight: 900; font-size: 1.05rem; }
+        .ticker { color: #64748b; font-size: 0.82rem; margin-top: 2px; }
+        .direction {
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 900;
+        }
+        .direction-buy { background: #dcfce7; color: #166534; }
+        .direction-sell { background: #fee2e2; color: #991b1b; }
+        .levels {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 12px 0;
+        }
+        .level {
+            background: #f1f5f9;
+            border-radius: 12px;
+            padding: 10px;
+        }
+        .label { color: #64748b; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
+        .value { font-weight: 900; }
+        .score-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            color: #475569;
+            font-size: 0.88rem;
+            border-top: 1px dashed #cbd5e1;
+            padding-top: 12px;
+        }
+        .fundamentals {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 4px;
+        }
+        .fundamentals .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #eef2ff;
+            border: 1px solid #c7d2fe;
+            color: #3730a3;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+        .fundamentals .chip.empty { background: #f1f5f9; border-color: #e2e8f0; color: #94a3b8; font-weight: 600; }
+        .fundamentals .chip.dividend { background: #ecfdf5; border-color: #bbf7d0; color: #047857; }
+        .fundamentals .chip.per { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+        .empty {
+            padding: 34px 22px;
+            text-align: center;
+            color: #64748b;
+        }
+        .prompt-wrap { padding: 18px; }
+        textarea {
+            width: 100%;
+            min-height: 620px;
+            resize: vertical;
+            border: 1px solid #d1d5db;
+            border-radius: 16px;
+            padding: 16px;
+            line-height: 1.45;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+            font-size: 0.88rem;
+            color: #111827;
+            background: #f9fafb;
+        }
+        .notice {
+            margin-top: 14px;
+            background: #fffbeb;
+            color: #92400e;
+            border: 1px solid #fde68a;
+            padding: 12px 14px;
+            border-radius: 14px;
+            line-height: 1.45;
+            font-size: 0.92rem;
+        }
+        #copyStatus { font-weight: 800; color: #047857; margin-top: 10px; display: none; }
+        .status-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin: 6px 0 18px;
+            font-size: 0.88rem;
+            color: #475569;
+        }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #f1f5f9;
+            border: 1px solid #e2e8f0;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-weight: 700;
+        }
+        .pill.stale { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+        .pill.fresh { background: #dcfce7; border-color: #bbf7d0; color: #166534; }
+        .pill.refresh { background: #dbeafe; border-color: #bfdbfe; color: #1d4ed8; }
+        @media (max-width: 920px) {
+            .hero { flex-direction: column; }
+            .actions { justify-content: flex-start; }
+            .grid { grid-template-columns: 1fr; }
+            .levels { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<main class="page">
+    <section class="hero">
+        <div>
+            <div class="eyebrow">🎯 Séance du {{ date_seance }} • {{ heure_maj }}</div>
+            <h1>Meilleures opportunités intraday</h1>
+            <p class="subtitle">
+                Cette page sélectionne les signaux les plus intéressants depuis l'analyse technique et le sentiment news.
+                Le prompt à droite reprend ton brief complet et ajoute les données internes pour générer un bulletin pédagogique.
+            </p>
+            <div class="status-bar">
+                <span class="pill {% if is_stale %}stale{% else %}fresh{% endif %}">
+                    {% if is_stale %}⏳{% else %}✅{% endif %} {{ freshness_label }}
+                </span>
+                <span class="pill">📈 {{ signals_count }} signaux en base</span>
+                {% if refresh_status %}
+                <span class="pill refresh">🔄 {{ refresh_status }}</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn btn-refresh" onclick="refreshSignals(event)">↻ Recalculer les signaux</button>
+            <button class="btn btn-primary" onclick="sendIntradayEmail(event, 'morning')">Email 9h</button>
+            <button class="btn btn-primary" onclick="sendIntradayEmail(event, 'evening')">Récap 17h</button>
+            <button class="btn btn-primary" onclick="copyPrompt()">Copier le prompt</button>
+            <a class="btn btn-secondary" href="/dashboard">Retour</a>
+        </div>
+    </section>
+
+    <div class="grid">
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2>📊 Sélection automatique</h2>
+                    <p class="muted">Entrée, stop-loss et objectif sont des repères éducatifs calculés autour du dernier prix.</p>
+                </div>
+            </div>
+
+            {% if opportunities %}
+            <div class="opportunity-list">
+                {% for opp in opportunities %}
+                <article class="opportunity-card">
+                    <div class="card-top">
+                        <div style="display: flex; gap: 12px;">
+                            <div class="rank">{{ loop.index }}</div>
+                            <div>
+                                <div class="name">{{ opp.name }}</div>
+                                <div class="ticker">{{ opp.ticker }} • Score combiné {{ opp.combined_score }}</div>
+                            </div>
+                        </div>
+                        <span class="direction {% if opp.direction == 'Achat' %}direction-buy{% else %}direction-sell{% endif %}">
+                            {{ opp.direction }}
+                        </span>
+                    </div>
+
+                    <div class="levels">
+                        <div class="level">
+                            <div class="label">Entrée</div>
+                            <div class="value">{{ "%.2f"|format(opp.entry) }} {{ opp.devise }}</div>
+                        </div>
+                        <div class="level">
+                            <div class="label">Stop-loss</div>
+                            <div class="value">{{ "%.2f"|format(opp.stop_loss) }} {{ opp.devise }}</div>
+                        </div>
+                        <div class="level">
+                            <div class="label">Objectif</div>
+                            <div class="value">{{ "%.2f"|format(opp.target) }} {{ opp.devise }}</div>
+                        </div>
+                    </div>
+
+                    <div class="fundamentals">
+                        {% if opp.dividend_yield is not none and opp.dividend_yield > 0 %}
+                        <span class="chip dividend" title="Rendement du dividende (annuel)">
+                            💵 Dividende {{ "%.2f"|format(opp.dividend_yield) }}%
+                            {% if opp.dividend_rate is not none and opp.dividend_rate > 0 %}
+                                ({{ "%.2f"|format(opp.dividend_rate) }} {{ opp.devise }}/action)
+                            {% endif %}
+                        </span>
+                        {% else %}
+                        <span class="chip empty">💵 Pas de dividende connu</span>
+                        {% endif %}
+                        {% if opp.trailing_pe is not none and opp.trailing_pe > 0 %}
+                        <span class="chip per" title="Price/Earnings Ratio (TTM)">
+                            📊 PER {{ "%.1f"|format(opp.trailing_pe) }}
+                        </span>
+                        {% elif opp.forward_pe is not none and opp.forward_pe > 0 %}
+                        <span class="chip per" title="Price/Earnings Ratio (forward)">
+                            📊 PER prévu {{ "%.1f"|format(opp.forward_pe) }}
+                        </span>
+                        {% else %}
+                        <span class="chip empty">📊 PER —</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="score-row">
+                        <span>{{ opp.signal }}</span>
+                        <span>Technique {{ opp.technical_score }}/100</span>
+                        <span>News {{ opp.sentiment_score }} • {{ opp.news_count }} article(s)</span>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">
+                <h3>Aucun signal exploitable pour l'instant</h3>
+                <p style="margin-top: 8px;">Lance d'abord « Analyse Technique » puis reviens ici après quelques minutes.</p>
+            </div>
+            {% endif %}
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2>🧠 Prompt bulletin</h2>
+                    <p class="muted">À coller dans ton assistant IA pour produire le bulletin complet.</p>
+                </div>
+            </div>
+            <div class="prompt-wrap">
+                <textarea id="intradayPrompt" readonly>{{ prompt }}</textarea>
+                <div id="copyStatus">Prompt copié.</div>
+                <div class="notice">
+                    Note : cette sélection est un filtre de travail, pas un conseil financier. Le bulletin final doit rester éducatif et rappeler le risque de perte.
+                </div>
+            </div>
+        </section>
+    </div>
+</main>
+
+<script>
+function copyPrompt() {
+    const textarea = document.getElementById('intradayPrompt');
+    textarea.select();
+    textarea.setSelectionRange(0, 99999);
+    navigator.clipboard.writeText(textarea.value).then(() => {
+        const status = document.getElementById('copyStatus');
+        status.style.display = 'block';
+        setTimeout(() => status.style.display = 'none', 2200);
+    });
+}
+
+function refreshSignals(event) {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = 'Analyse en cours...';
+
+    fetch('/api/update_trading_signals')
+        .then(response => response.json())
+        .then(data => {
+            const wait = data && data.tickers ? Math.min(60, Math.max(12, data.tickers * 0.4)) : 20;
+            button.textContent = `Analyse en cours… (${Math.round(wait)}s)`;
+            setTimeout(() => {
+                const url = new URL(window.location.href);
+                url.searchParams.set('refresh', '1');
+                window.location.href = url.toString();
+            }, wait * 1000);
+        })
+        .catch(() => {
+            button.disabled = false;
+            button.textContent = '↻ Recalculer les signaux';
+            alert("Impossible de lancer l'analyse technique.");
+        });
+}
+
+{% if refresh_status %}
+// Un recalcul est en cours côté serveur : on rafraîchit automatiquement la page
+// dans ~90 secondes pour récupérer les nouveaux signaux du jour.
+setTimeout(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('refresh');
+    window.location.href = url.toString();
+}, 90000);
+{% endif %}
+
+function sendIntradayEmail(event, moment) {
+    const button = event.currentTarget;
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Envoi...';
+
+    fetch(`/api/cron/intraday_email/${moment}`)
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) {
+                throw new Error(data.error || data.message || 'Envoi impossible');
+            }
+            button.textContent = 'Envoyé';
+            setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalText;
+            }, 2500);
+        })
+        .catch(error => {
+            button.disabled = false;
+            button.textContent = originalText;
+            alert(error.message);
+        });
+}
+</script>
+</body>
+</html>
