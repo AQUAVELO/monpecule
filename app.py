@@ -943,7 +943,8 @@ def dashboard():
         # Calculer le mois actuel
         from datetime import datetime
         mois_actuel = datetime.now().strftime("%Y-%m")
-        
+        debut_mois_str = mois_actuel + "-01"
+
         total_achat = 0
         total_actuel = 0
         total_pv = 0
@@ -991,20 +992,32 @@ def dashboard():
             pv_eur = convert_currency(pv, devise_cotation, 'EUR')
             day_pv_eur = convert_currency(day_pv, devise_cotation, 'EUR')
             
-            # Récupérer le cumul du mois depuis la table dédiée
-            # IMPORTANT : Afficher SEULEMENT le cumul (PAS la PV du jour en cours)
-            # Le cumul sera mis à jour à 17h45 par le CRON
-            cumul_mois_row = conn.execute(
-                'SELECT cumul_pv FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-                (a['id'], mois_actuel)
+            # PV du mois calculée en direct : cours actuel - dernier cours connu
+            # avant le 1er du mois (historique_prix). Plus besoin d'un CRON de
+            # cumul (qui n'était jamais appelé avec cumul=true -> 0 € affiché).
+            # Titre ajouté en cours de mois : référence = premier cours du mois.
+            ref_row = conn.execute(
+                'SELECT prix FROM historique_prix WHERE actif_id = ? AND date < ? '
+                'ORDER BY date DESC LIMIT 1',
+                (a['id'], debut_mois_str)
+            ).fetchone() or conn.execute(
+                'SELECT prix FROM historique_prix WHERE actif_id = ? AND date >= ? '
+                'ORDER BY date ASC LIMIT 1',
+                (a['id'], debut_mois_str)
             ).fetchone()
-            
-            if cumul_mois_row:
-                month_pv_eur = safe_float(cumul_mois_row['cumul_pv'])
+            prix_ref = safe_float(ref_row['prix']) if ref_row else 0
+            if prix_ref > 0 and p_actuel > 0:
+                month_pv_eur = convert_currency((p_actuel - prix_ref) * qty, devise_cotation, 'EUR')
             else:
-                # Pas encore de cumul pour ce mois : afficher 0
                 month_pv_eur = 0
-            
+
+            # Garder l'historique mensuel (modale) à jour pour le mois en cours
+            conn.execute('DELETE FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
+                         (a['id'], mois_actuel))
+            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) '
+                         'VALUES (?, ?, ?, ?)',
+                         (a['id'], mois_actuel, round(month_pv_eur, 4), 'live'))
+
             # Calcul de la variation journalière en %
             if p_veille > 0:
                 day_perf_pct = ((p_actuel - p_veille) / p_veille) * 100
@@ -1031,7 +1044,8 @@ def dashboard():
         sorted_day_perfs = sorted(day_performances, key=lambda x: x['perf'], reverse=True)
         top_gainers = sorted_day_perfs[:4]
         top_losers = sorted(day_performances, key=lambda x: x['perf'])[:4]
-        
+
+        conn.commit()
         conn.close()
         
         return render_template('dashboard.html', comptes=comptes, actifs=actifs,
