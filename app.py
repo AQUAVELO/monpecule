@@ -1,15 +1,18 @@
 import os
 import sys
 import re
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
 import sqlite3
 import hashlib
 import yfinance as yf
 import requests
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import threading
+import concurrent.futures
 import smtplib
 from email.message import EmailMessage
+import csv
+import io
 
 app = Flask(__name__)
 app.secret_key = 'monpecule_secret_key_2026_change_this_in_production'
@@ -943,8 +946,7 @@ def dashboard():
         # Calculer le mois actuel
         from datetime import datetime
         mois_actuel = datetime.now().strftime("%Y-%m")
-        debut_mois_str = mois_actuel + "-01"
-
+        
         total_achat = 0
         total_actuel = 0
         total_pv = 0
@@ -992,32 +994,20 @@ def dashboard():
             pv_eur = convert_currency(pv, devise_cotation, 'EUR')
             day_pv_eur = convert_currency(day_pv, devise_cotation, 'EUR')
             
-            # PV du mois calculée en direct : cours actuel - dernier cours connu
-            # avant le 1er du mois (historique_prix). Plus besoin d'un CRON de
-            # cumul (qui n'était jamais appelé avec cumul=true -> 0 € affiché).
-            # Titre ajouté en cours de mois : référence = premier cours du mois.
-            ref_row = conn.execute(
-                'SELECT prix FROM historique_prix WHERE actif_id = ? AND date < ? '
-                'ORDER BY date DESC LIMIT 1',
-                (a['id'], debut_mois_str)
-            ).fetchone() or conn.execute(
-                'SELECT prix FROM historique_prix WHERE actif_id = ? AND date >= ? '
-                'ORDER BY date ASC LIMIT 1',
-                (a['id'], debut_mois_str)
+            # Récupérer le cumul du mois depuis la table dédiée
+            # IMPORTANT : Afficher SEULEMENT le cumul (PAS la PV du jour en cours)
+            # Le cumul sera mis à jour à 17h45 par le CRON
+            cumul_mois_row = conn.execute(
+                'SELECT cumul_pv FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
+                (a['id'], mois_actuel)
             ).fetchone()
-            prix_ref = safe_float(ref_row['prix']) if ref_row else 0
-            if prix_ref > 0 and p_actuel > 0:
-                month_pv_eur = convert_currency((p_actuel - prix_ref) * qty, devise_cotation, 'EUR')
+            
+            if cumul_mois_row:
+                month_pv_eur = safe_float(cumul_mois_row['cumul_pv'])
             else:
+                # Pas encore de cumul pour ce mois : afficher 0
                 month_pv_eur = 0
-
-            # Garder l'historique mensuel (modale) à jour pour le mois en cours
-            conn.execute('DELETE FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-                         (a['id'], mois_actuel))
-            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) '
-                         'VALUES (?, ?, ?, ?)',
-                         (a['id'], mois_actuel, round(month_pv_eur, 4), 'live'))
-
+            
             # Calcul de la variation journalière en %
             if p_veille > 0:
                 day_perf_pct = ((p_actuel - p_veille) / p_veille) * 100
@@ -1044,8 +1034,7 @@ def dashboard():
         sorted_day_perfs = sorted(day_performances, key=lambda x: x['perf'], reverse=True)
         top_gainers = sorted_day_perfs[:4]
         top_losers = sorted(day_performances, key=lambda x: x['perf'])[:4]
-
-        conn.commit()
+        
         conn.close()
         
         return render_template('dashboard.html', comptes=comptes, actifs=actifs,
@@ -1061,6 +1050,154 @@ def dashboard():
                               cron_token=CRON_TOKEN)
     except Exception as e:
         return f"Erreur Dashboard: {e}"
+
+def _fmt_num(value, decimals=2):
+    """Format français pour Excel (virgule décimale)."""
+    try:
+        return f"{float(value):.{decimals}f}".replace('.', ',')
+    except (TypeError, ValueError):
+        return ''
+
+@app.route('/export_portefeuille')
+def export_portefeuille():
+    """Export CSV des valeurs (cours) et montants du portefeuille."""
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+
+    conn = get_connection()
+    user_info = conn.execute(
+        'SELECT devise, nom FROM users WHERE id = ?',
+        (session['user_id'],)
+    ).fetchone()
+    user_devise = (user_info['devise'] if user_info and user_info['devise'] else 'EUR')
+    currency_symbol = CURRENCY_SYMBOLS.get(user_devise, '€')
+
+    actifs = conn.execute('''
+        SELECT a.*, c.nom_compte
+        FROM actifs a
+        JOIN comptes c ON a.compte_id = c.id
+        WHERE c.user_id = ?
+        ORDER BY c.nom_compte COLLATE NOCASE, a.nom_actif COLLATE NOCASE
+    ''', (session['user_id'],)).fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    # Séparateur point-virgule pour Excel FR
+    writer = csv.writer(output, delimiter=';', lineterminator='\n')
+    writer.writerow([
+        'Compte',
+        'Nom',
+        'Ticker/ISIN',
+        'Quantite',
+        'Devise cotation',
+        'Date achat',
+        'Cours achat',
+        'Cours actuel',
+        'Cours veille',
+        'Frais',
+        'Total achat (devise cotation)',
+        'Total actuel (devise cotation)',
+        'Plus-value (devise cotation)',
+        'Plus-value %',
+        'Variation jour (devise cotation)',
+        f'Total achat ({user_devise})',
+        f'Total actuel ({user_devise})',
+        f'Plus-value ({user_devise})',
+        f'Variation jour ({user_devise})',
+    ])
+
+    total_achat_user = 0.0
+    total_actuel_user = 0.0
+    total_pv_user = 0.0
+    total_day_user = 0.0
+
+    for a in actifs:
+        p_actuel = safe_float(a['prix_actuel'])
+        p_achat = safe_float(a['prix_achat'])
+        p_veille = safe_float(a['prix_veille'])
+        qty = safe_int(a['quantite'])
+        frais = safe_float(a['frais'])
+        try:
+            devise_cotation = a['devise_cotation'] or 'EUR'
+        except (KeyError, IndexError):
+            devise_cotation = 'EUR'
+
+        val_actuelle = (p_actuel * qty) + frais
+        val_achat = (p_achat * qty) + frais
+        if p_veille == 0 or abs(p_veille - p_actuel) > (p_actuel * 0.20):
+            day_pv = val_actuelle - val_achat
+        else:
+            day_pv = val_actuelle - ((p_veille * qty) + frais)
+        pv = val_actuelle - val_achat
+        pv_pct = ((p_actuel - p_achat) / p_achat * 100) if p_achat > 0 else 0.0
+
+        val_achat_user = convert_currency(
+            convert_currency(val_achat, devise_cotation, 'EUR'), 'EUR', user_devise
+        )
+        val_actuelle_user = convert_currency(
+            convert_currency(val_actuelle, devise_cotation, 'EUR'), 'EUR', user_devise
+        )
+        pv_user = convert_currency(
+            convert_currency(pv, devise_cotation, 'EUR'), 'EUR', user_devise
+        )
+        day_user = convert_currency(
+            convert_currency(day_pv, devise_cotation, 'EUR'), 'EUR', user_devise
+        )
+
+        total_achat_user += val_achat_user
+        total_actuel_user += val_actuelle_user
+        total_pv_user += pv_user
+        total_day_user += day_user
+
+        date_achat = a['date_achat'] if 'date_achat' in a.keys() else ''
+        writer.writerow([
+            a['nom_compte'],
+            a['nom_actif'],
+            a['ticker_isin'],
+            qty if qty == int(qty) else _fmt_num(qty, 4),
+            devise_cotation,
+            date_achat or '',
+            _fmt_num(p_achat, 4),
+            _fmt_num(p_actuel, 4),
+            _fmt_num(p_veille, 4),
+            _fmt_num(frais, 2),
+            _fmt_num(val_achat, 2),
+            _fmt_num(val_actuelle, 2),
+            _fmt_num(pv, 2),
+            _fmt_num(pv_pct, 2),
+            _fmt_num(day_pv, 2),
+            _fmt_num(val_achat_user, 2),
+            _fmt_num(val_actuelle_user, 2),
+            _fmt_num(pv_user, 2),
+            _fmt_num(day_user, 2),
+        ])
+
+    writer.writerow([])
+    writer.writerow([
+        'TOTAL',
+        '', '', '', '', '', '', '', '', '', '', '', '', '', '',
+        _fmt_num(total_achat_user, 2),
+        _fmt_num(total_actuel_user, 2),
+        _fmt_num(total_pv_user, 2),
+        _fmt_num(total_day_user, 2),
+    ])
+    writer.writerow([
+        f'Devise affichage: {user_devise} ({currency_symbol})',
+        f'Export le {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+        f'Lignes: {len(actifs)}',
+    ])
+
+    filename = f"monpecule_portefeuille_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    # BOM UTF-8 pour Excel
+    csv_data = '\ufeff' + output.getvalue()
+    return Response(
+        csv_data,
+        mimetype='text/csv; charset=utf-8',
+        headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'Cache-Control': 'no-store',
+        },
+    )
 
 @app.route('/add_compte', methods=['POST'])
 def add_compte():
@@ -1173,9 +1310,6 @@ conseil_cache = {
     'data': None,
     'timestamp': None
 }
-
-import concurrent.futures
-
 
 INTRADAY_BULLETIN_PROMPT = """Tu es un analyste financier expert en trading intraday sur les marchés actions (CAC 40, S&P 500, Nasdaq). Tu travailles pour le site monpecule.fr, dont le public est composé de débutants qui apprennent à trader. Ton rôle est de produire des analyses claires, pédagogiques et actionnables, sans jargon inutile — ou en expliquant chaque terme technique utilisé.
 
@@ -3148,7 +3282,7 @@ def fetch_closes_eodhd_periode(ticker_eodhd, date_from, date_to):
             "api_token": EODHD_API_KEY,
             "fmt": "json"
         }
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(url, params=params, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, list) and data:
@@ -3156,6 +3290,25 @@ def fetch_closes_eodhd_periode(ticker_eodhd, date_from, date_to):
     except Exception:
         pass
     return []
+
+
+def _eod_close(row):
+    val = row.get('close') if isinstance(row, dict) else None
+    if val is None and isinstance(row, dict):
+        val = row.get('adjusted_close')
+    return float(val) if val is not None else None
+
+
+def _fetch_closes_eodhd_candidats(ticker_eodhd, date_from, date_to):
+    """Essaie le ticker EODHD puis la variante .PA si besoin."""
+    candidats = [ticker_eodhd]
+    if '.' not in ticker_eodhd:
+        candidats.append(ticker_eodhd + '.PA')
+    for cand in candidats:
+        raw = fetch_closes_eodhd_periode(cand, date_from, date_to)
+        if raw:
+            return cand, raw
+    return None, []
 
 
 def resoudre_ticker_eodhd(ticker_isin_brut):
@@ -3209,110 +3362,284 @@ def api_calcul_pv_mois_historique():
         return jsonify({'error': 'Paramètre mois requis (YYYY-MM)'}), 400
 
     try:
-        from datetime import timedelta, date
         annee, num_mois = int(mois.split('-')[0]), int(mois.split('-')[1])
         debut_mois = date(annee, num_mois, 1)
         if num_mois == 12:
             debut_mois_suivant = date(annee + 1, 1, 1)
         else:
             debut_mois_suivant = date(annee, num_mois + 1, 1)
-        # Élargir la fenêtre pour capturer le dernier jour de bourse du mois précédent
         date_from = (debut_mois - timedelta(days=10)).strftime('%Y-%m-%d')
         date_to   = (debut_mois_suivant + timedelta(days=3)).strftime('%Y-%m-%d')
     except Exception as e:
         return jsonify({'error': f'Format de mois invalide : {e}'}), 400
 
-    conn = get_connection()
+    conn = None
+    try:
+        conn = get_connection()
+        actifs = conn.execute('''
+            SELECT a.id, a.ticker_isin, a.nom_actif, a.quantite, a.devise_cotation
+            FROM actifs a
+            JOIN comptes c ON a.compte_id = c.id
+            WHERE c.user_id = ? AND TRIM(a.ticker_isin) != ""
+        ''', (session['user_id'],)).fetchall()
+
+        par_ticker = {}
+        for actif in actifs:
+            ticker_brut = (actif['ticker_isin'] or '').strip()
+            ticker_eodhd, devise_auto = resoudre_ticker_eodhd(ticker_brut)
+            par_ticker.setdefault(ticker_eodhd, []).append((actif, ticker_brut, devise_auto))
+
+        fetched = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_t = {
+                executor.submit(_fetch_closes_eodhd_candidats, t, date_from, date_to): t
+                for t in par_ticker
+            }
+            for future in concurrent.futures.as_completed(future_to_t):
+                t = future_to_t[future]
+                try:
+                    fetched[t] = future.result()
+                except Exception:
+                    fetched[t] = (None, [])
+
+        debut_str = debut_mois.strftime('%Y-%m-%d')
+        fin_str = debut_mois_suivant.strftime('%Y-%m-%d')
+        resultats = []
+        erreurs = []
+
+        for ticker_eodhd, items in par_ticker.items():
+            ticker_ok, closes = fetched.get(ticker_eodhd, (None, []))
+            if not closes:
+                for actif, ticker_brut, _ in items:
+                    erreurs.append(f"{actif['nom_actif']} ({ticker_brut}→{ticker_eodhd}) : pas de données EODHD")
+                continue
+
+            closes = sorted(closes, key=lambda x: x.get('date', ''))
+            avant = [c for c in closes if c.get('date', '') < debut_str]
+            dans  = [c for c in closes if debut_str <= c.get('date', '') < fin_str]
+            prix_debut = _eod_close(avant[-1]) if avant else None
+            prix_fin = _eod_close(dans[-1]) if dans else None
+            if prix_debut is None or prix_fin is None:
+                for actif, ticker_brut, _ in items:
+                    erreurs.append(
+                        f"{actif['nom_actif']} ({ticker_ok or ticker_eodhd}) : "
+                        f"données incomplètes ({len(avant)} avant / {len(dans)} dans le mois)"
+                    )
+                continue
+
+            for actif, ticker_brut, devise_auto in items:
+                quantite = safe_int(actif['quantite'])
+                devise = actif['devise_cotation'] or devise_auto or 'EUR'
+                pv_brute = (prix_fin - prix_debut) * quantite
+                pv_eur = convert_currency(pv_brute, devise, 'EUR')
+
+                existing = conn.execute(
+                    'SELECT id FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
+                    (actif['id'], mois)
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        'UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
+                        (round(pv_eur, 4), mois + '-recalc', existing['id'])
+                    )
+                else:
+                    conn.execute(
+                        'INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
+                        (actif['id'], mois, round(pv_eur, 4), mois + '-recalc')
+                    )
+
+                resultats.append({
+                    'actif': actif['nom_actif'],
+                    'ticker': ticker_ok,
+                    'prix_debut': round(prix_debut, 4),
+                    'prix_fin': round(prix_fin, 4),
+                    'pv_eur': round(pv_eur, 2)
+                })
+
+        conn.commit()
+        total_pv = sum(r['pv_eur'] for r in resultats)
+        return jsonify({
+            'success': True,
+            'mois': mois,
+            'nb_actifs': len(resultats),
+            'total_pv_eur': round(total_pv, 2),
+            'resultats': resultats,
+            'erreurs': erreurs
+        })
+    except Exception as e:
+        print(f"Erreur calcul_pv_mois_historique: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+def _month_date_bounds(mois):
+    """Retourne (debut, fin_exclusive) pour un mois YYYY-MM."""
+    annee, num_mois = int(mois[:4]), int(mois[5:7])
+    debut = date(annee, num_mois, 1)
+    if num_mois == 12:
+        fin = date(annee + 1, 1, 1)
+    else:
+        fin = date(annee, num_mois + 1, 1)
+    return debut, fin
+
+
+def _actif_pv_mois_from_historique(conn, actif_id, quantite, devise, mois):
+    """Estime la PV mensuelle d'un actif depuis historique_prix (EUR)."""
+    debut, fin = _month_date_bounds(mois)
+    debut_str = debut.isoformat()
+    fin_str = fin.isoformat()
+
+    row_avant = conn.execute(
+        'SELECT prix, date FROM historique_prix WHERE actif_id = ? AND date < ? ORDER BY date DESC LIMIT 1',
+        (actif_id, debut_str),
+    ).fetchone()
+    row_fin = conn.execute(
+        'SELECT prix, date FROM historique_prix WHERE actif_id = ? AND date < ? ORDER BY date DESC LIMIT 1',
+        (actif_id, fin_str),
+    ).fetchone()
+
+    if not row_avant or not row_fin or row_fin['date'] <= row_avant['date']:
+        return None
+
+    pv_brute = (safe_float(row_fin['prix']) - safe_float(row_avant['prix'])) * safe_int(quantite, 1)
+    return convert_currency(pv_brute, devise or 'EUR', 'EUR')
+
+
+def _add_pv_entry(by_mois, detail_map, mois, compte, pv):
+    if mois not in by_mois:
+        by_mois[mois] = {'pv_plus': 0.0, 'pv_moins': 0.0, 'total_pv': 0.0}
+    if pv >= 0:
+        by_mois[mois]['pv_plus'] += pv
+    else:
+        by_mois[mois]['pv_moins'] += pv
+    by_mois[mois]['total_pv'] += pv
+
+    key = (mois, compte)
+    if key not in detail_map:
+        detail_map[key] = {'mois': mois, 'compte': compte, 'pv_plus': 0.0, 'pv_moins': 0.0, 'pv_compte': 0.0}
+    if pv >= 0:
+        detail_map[key]['pv_plus'] += pv
+    else:
+        detail_map[key]['pv_moins'] += pv
+    detail_map[key]['pv_compte'] += pv
+
+
+def _build_historique_pv_mois_user(conn, user_id):
+    """Construit l'historique PV/MV par mois avec estimation si mois passé non suivi (=0)."""
+    mois_actuel = datetime.now().strftime('%Y-%m')
+    rows = conn.execute('''
+        SELECT c.mois, c.cumul_pv, c.derniere_mise_a_jour,
+               a.id as actif_id, a.quantite, a.devise_cotation,
+               co.nom_compte
+        FROM cumul_pv_mois c
+        JOIN actifs a ON c.actif_id = a.id
+        JOIN comptes co ON a.compte_id = co.id
+        WHERE co.user_id = ?
+    ''', (user_id,)).fetchall()
+
+    mois_fr = {
+        '01': 'Janvier', '02': 'Février', '03': 'Mars', '04': 'Avril',
+        '05': 'Mai', '06': 'Juin', '07': 'Juillet', '08': 'Août',
+        '09': 'Septembre', '10': 'Octobre', '11': 'Novembre', '12': 'Décembre'
+    }
+
+    by_mois = {}
+    detail_map = {}
+    counted_actif_mois = set()
+
+    for row in rows:
+        mois = row['mois']
+        pv = safe_float(row['cumul_pv'])
+        dmj = row['derniere_mise_a_jour'] or ''
+
+        if mois < mois_actuel and abs(pv) < 0.01 and '-recalc' not in dmj:
+            est = _actif_pv_mois_from_historique(
+                conn, row['actif_id'], row['quantite'], row['devise_cotation'], mois
+            )
+            if est is not None:
+                pv = est
+
+        _add_pv_entry(by_mois, detail_map, mois, row['nom_compte'], pv)
+        counted_actif_mois.add((row['actif_id'], mois))
+
     actifs = conn.execute('''
-        SELECT a.id, a.ticker_isin, a.nom_actif, a.quantite, a.devise_cotation
+        SELECT a.id as actif_id, a.quantite, a.devise_cotation, co.nom_compte
         FROM actifs a
-        JOIN comptes c ON a.compte_id = c.id
-        WHERE c.user_id = ? AND TRIM(a.ticker_isin) != ""
-    ''', (session['user_id'],)).fetchall()
-
-    resultats = []
-    erreurs = []
-
+        JOIN comptes co ON a.compte_id = co.id
+        WHERE co.user_id = ?
+    ''', (user_id,)).fetchall()
+    mois_historique = conn.execute('''
+        SELECT DISTINCT substr(h.date, 1, 7) as mois
+        FROM historique_prix h
+        JOIN actifs a ON h.actif_id = a.id
+        JOIN comptes co ON a.compte_id = co.id
+        WHERE co.user_id = ?
+    ''', (user_id,)).fetchall()
+    all_mois = sorted(
+        set(by_mois.keys()) | {r['mois'] for r in mois_historique if r['mois'] and len(r['mois']) == 7},
+        reverse=True,
+    )
     for actif in actifs:
-        ticker_brut = actif['ticker_isin'].strip()
-        quantite    = safe_int(actif['quantite'])
-        devise      = actif['devise_cotation'] or 'EUR'
-        nom         = actif['nom_actif']
+        for mois in all_mois:
+            if mois >= mois_actuel or (actif['actif_id'], mois) in counted_actif_mois:
+                continue
+            est = _actif_pv_mois_from_historique(
+                conn, actif['actif_id'], actif['quantite'], actif['devise_cotation'], mois
+            )
+            if est is not None:
+                _add_pv_entry(by_mois, detail_map, mois, actif['nom_compte'], est)
 
-        ticker_eodhd, devise_auto = resoudre_ticker_eodhd(ticker_brut)
+    historique = []
+    recap_par_annee = {}
+    for mois in sorted(by_mois.keys(), reverse=True):
+        data = by_mois[mois]
+        annee, num_mois = mois.split('-')
+        pv_plus = round(data['pv_plus'], 2)
+        pv_moins = round(data['pv_moins'], 2)
+        total_pv = round(data['total_pv'], 2)
+        historique.append({
+            'mois': mois,
+            'label': f"{mois_fr.get(num_mois, num_mois)} {annee}",
+            'annee': annee,
+            'pv_plus': pv_plus,
+            'pv_moins': pv_moins,
+            'total_pv': total_pv,
+        })
+        if annee not in recap_par_annee:
+            recap_par_annee[annee] = {'annee': annee, 'pv_plus': 0.0, 'pv_moins': 0.0, 'total_pv': 0.0}
+        recap_par_annee[annee]['pv_plus'] += pv_plus
+        recap_par_annee[annee]['pv_moins'] += pv_moins
+        recap_par_annee[annee]['total_pv'] += total_pv
 
-        # Si la devise_cotation n'est pas définie, utiliser celle détectée
-        if not actif['devise_cotation']:
-            devise = devise_auto
-
-        # Tentatives EODHD : ticker résolu, puis variante .PA si pas de suffixe
-        candidats = [ticker_eodhd]
-        if '.' not in ticker_eodhd:
-            candidats.append(ticker_eodhd + '.PA')
-
-        closes = []
-        ticker_ok = None
-        for cand in candidats:
-            raw = fetch_closes_eodhd_periode(cand, date_from, date_to)
-            if raw:
-                closes = raw
-                ticker_ok = cand
-                break
-
-        if not closes:
-            erreurs.append(f"{nom} ({ticker_brut}→{ticker_eodhd}) : pas de données EODHD")
-            continue
-
-        # Trier par date
-        closes.sort(key=lambda x: x['date'])
-
-        # Prix avant le mois (dernier jour de bourse du mois précédent)
-        avant = [c for c in closes if c['date'] < debut_mois.strftime('%Y-%m-%d')]
-        dans  = [c for c in closes if debut_mois.strftime('%Y-%m-%d') <= c['date'] < debut_mois_suivant.strftime('%Y-%m-%d')]
-
-        if not avant or not dans:
-            erreurs.append(f"{nom} ({ticker_ok}) : données incomplètes ({len(avant)} avant / {len(dans)} dans le mois)")
-            continue
-
-        prix_debut = float(avant[-1]['close'])
-        prix_fin   = float(dans[-1]['close'])
-
-        pv_brute = (prix_fin - prix_debut) * quantite
-        pv_eur   = convert_currency(pv_brute, devise, 'EUR')
-
-        # Sauvegarder dans cumul_pv_mois
-        existing = conn.execute(
-            'SELECT id FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-            (actif['id'], mois)
-        ).fetchone()
-
-        if existing:
-            conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
-                        (round(pv_eur, 4), mois + '-recalc', existing['id']))
-        else:
-            conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
-                        (actif['id'], mois, round(pv_eur, 4), mois + '-recalc'))
-
-        resultats.append({
-            'actif': nom,
-            'ticker': ticker_ok,
-            'prix_debut': round(prix_debut, 4),
-            'prix_fin':   round(prix_fin, 4),
-            'pv_eur':     round(pv_eur, 2)
+    detail = []
+    for (mois, compte), data in sorted(detail_map.items(), key=lambda x: (x[0][0], x[0][1]), reverse=True):
+        annee, num_mois = mois.split('-')
+        detail.append({
+            'mois': mois,
+            'label': f"{mois_fr.get(num_mois, num_mois)} {annee}",
+            'compte': compte,
+            'pv_plus': round(data['pv_plus'], 2),
+            'pv_moins': round(data['pv_moins'], 2),
+            'pv_compte': round(data['pv_compte'], 2),
         })
 
-    conn.commit()
-    conn.close()
+    recap_annees = sorted(
+        [
+            {
+                'annee': a,
+                'pv_plus': round(v['pv_plus'], 2),
+                'pv_moins': round(v['pv_moins'], 2),
+                'total_pv': round(v['total_pv'], 2),
+            }
+            for a, v in recap_par_annee.items()
+        ],
+        key=lambda x: x['annee'],
+        reverse=True,
+    )
 
-    total_pv = sum(r['pv_eur'] for r in resultats)
-    return jsonify({
-        'success': True,
-        'mois': mois,
-        'nb_actifs': len(resultats),
-        'total_pv_eur': round(total_pv, 2),
-        'resultats': resultats,
-        'erreurs': erreurs
-    })
+    return historique, detail, recap_annees
 
 
 @app.route('/api/historique_pv_mois')
@@ -3322,60 +3649,15 @@ def api_historique_pv_mois():
         return jsonify({'error': 'Non connecté'}), 401
 
     conn = get_connection()
-
-    # Cumul global par mois (toutes les valeurs sont déjà en EUR)
-    mois_rows = conn.execute('''
-        SELECT c.mois, SUM(c.cumul_pv) as total_pv
-        FROM cumul_pv_mois c
-        JOIN actifs a ON c.actif_id = a.id
-        JOIN comptes co ON a.compte_id = co.id
-        WHERE co.user_id = ?
-        GROUP BY c.mois
-        ORDER BY c.mois DESC
-    ''', (session['user_id'],)).fetchall()
-
-    # Détail par compte et par mois
-    detail_rows = conn.execute('''
-        SELECT c.mois, co.nom_compte, SUM(c.cumul_pv) as pv_compte
-        FROM cumul_pv_mois c
-        JOIN actifs a ON c.actif_id = a.id
-        JOIN comptes co ON a.compte_id = co.id
-        WHERE co.user_id = ?
-        GROUP BY c.mois, co.id
-        ORDER BY c.mois DESC, co.nom_compte
-    ''', (session['user_id'],)).fetchall()
-
+    historique, detail, recap_annees = _build_historique_pv_mois_user(conn, session['user_id'])
     conn.close()
 
-    # Formater les mois en français
-    mois_fr = {
-        '01': 'Janvier', '02': 'Février', '03': 'Mars', '04': 'Avril',
-        '05': 'Mai', '06': 'Juin', '07': 'Juillet', '08': 'Août',
-        '09': 'Septembre', '10': 'Octobre', '11': 'Novembre', '12': 'Décembre'
-    }
-
-    historique = []
-    for row in mois_rows:
-        annee, num_mois = row['mois'].split('-')
-        label = f"{mois_fr.get(num_mois, num_mois)} {annee}"
-        historique.append({
-            'mois': row['mois'],
-            'label': label,
-            'total_pv': round(row['total_pv'] or 0, 2)
-        })
-
-    detail = []
-    for row in detail_rows:
-        annee, num_mois = row['mois'].split('-')
-        label = f"{mois_fr.get(num_mois, num_mois)} {annee}"
-        detail.append({
-            'mois': row['mois'],
-            'label': label,
-            'compte': row['nom_compte'],
-            'pv_compte': round(row['pv_compte'] or 0, 2)
-        })
-
-    return jsonify({'success': True, 'historique': historique, 'detail': detail})
+    return jsonify({
+        'success': True,
+        'historique': historique,
+        'detail': detail,
+        'recap_annees': recap_annees,
+    })
 
 
 @app.route('/api/stats_historique')
