@@ -3846,10 +3846,6 @@ def _run_prices_update(user_id, is_cron, cumul_actif):
                     nouveau_prix_veille = convert_currency(nouveau_prix_veille, currency, devise_actif)
                 elif not ancien_prix > 0:
                     nouveau_prix_veille = p
-                if devise_brute != devise_actif and devise_brute == 'USD':
-                    # Historique enregistré en dollars mais étiqueté EUR : corriger l'étiquette seulement
-                    conn.execute("UPDATE historique_prix SET devise = 'USD' WHERE actif_id = ? AND devise = ?",
-                                 (row['id'], devise_actif))
 
                 conn.execute('UPDATE actifs SET prix_actuel = ?, prix_veille = ?, devise_cotation = ? WHERE id = ?',
                            (round(float(p), 4), round(nouveau_prix_veille, 4), devise_actif, row['id']))
