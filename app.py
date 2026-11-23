@@ -37,7 +37,7 @@ def redirect_www():
 # Taux de change (EUR comme base)
 EXCHANGE_RATES = {
     'EUR': 1.0,
-    'USD': 1.08,  # 1 EUR = 1.08 USD
+    'USD': 1.09,  # valeur de secours, actualisée par refresh_exchange_rates()
     'GBP': 0.86   # 1 EUR = 0.86 GBP
 }
 
@@ -65,6 +65,67 @@ def convert_currency(amount, from_currency='EUR', to_currency='EUR'):
     # Convertir d'abord en EUR (base), puis vers la devise cible
     amount_in_eur = amount / EXCHANGE_RATES.get(from_currency, 1.0)
     return amount_in_eur * EXCHANGE_RATES.get(to_currency, 1.0)
+
+_fx_last_refresh = None
+
+def refresh_exchange_rates():
+    """Actualise les taux de change (Yahoo), au plus une fois par heure. Garde l'ancien taux en cas d'échec."""
+    global _fx_last_refresh
+    now = datetime.now()
+    if _fx_last_refresh and (now - _fx_last_refresh).total_seconds() < 3600:
+        return
+    ok = True
+    for dev in ('USD', 'GBP'):
+        meta = yahoo_quote_meta(f'EUR{dev}=X')
+        taux = (meta or {}).get('regularMarketPrice')
+        if taux and 0.3 < float(taux) < 3:
+            EXCHANGE_RATES[dev] = float(taux)
+        else:
+            ok = False
+    if ok:
+        _fx_last_refresh = now
+
+def yahoo_quote_meta(symbol):
+    """Métadonnées de cotation Yahoo (devise réelle, clôture précédente), ou None."""
+    try:
+        res = requests.get(
+            f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d',
+            headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)
+        if res.status_code == 200:
+            result = res.json().get('chart', {}).get('result')
+            if result:
+                return result[0].get('meta', {})
+    except Exception as e:
+        print(f'DEBUG yahoo_quote_meta {symbol}: {e}')
+    return None
+
+def calc_day_pv(prix_actuel, prix_veille, prix_achat, quantite, date_achat=''):
+    """PV du jour dans la devise de l'actif. Acheté aujourd'hui : depuis l'achat. Veille absente ou aberrante : 0."""
+    if date_achat == datetime.now().strftime('%Y-%m-%d') and prix_achat > 0:
+        return (prix_actuel - prix_achat) * quantite
+    if prix_veille <= 0 or prix_actuel <= 0 or abs(prix_actuel - prix_veille) > prix_veille * 0.60:
+        return 0.0
+    return (prix_actuel - prix_veille) * quantite
+
+def calc_month_pv_eur(conn, actif, mois):
+    """PV du mois en EUR : cours actuel - dernier cours d'avant le mois (ou prix d'achat si acheté dans le mois)."""
+    p_actuel = safe_float(actif['prix_actuel'])
+    qty = safe_int(actif['quantite'])
+    devise = actif['devise_cotation'] or 'EUR'
+    if p_actuel <= 0:
+        return 0.0
+    debut = mois + '-01'
+    if (actif['date_achat'] or '')[:7] == mois and safe_float(actif['prix_achat']) > 0:
+        return convert_currency((p_actuel - safe_float(actif['prix_achat'])) * qty, devise, 'EUR')
+    ref = conn.execute('SELECT prix, devise FROM historique_prix WHERE actif_id = ? AND date < ? AND prix > 0 ORDER BY date DESC LIMIT 1',
+                       (actif['id'], debut)).fetchone()
+    if not ref:
+        ref = conn.execute('SELECT prix, devise FROM historique_prix WHERE actif_id = ? AND date >= ? AND prix > 0 ORDER BY date ASC LIMIT 1',
+                           (actif['id'], debut)).fetchone()
+    if not ref:
+        return 0.0
+    prix_ref = convert_currency(safe_float(ref['prix']), ref['devise'] or devise, devise)
+    return convert_currency((p_actuel - prix_ref) * qty, devise, 'EUR')
 
 # Filtre personnalisé pour formater les dates
 @app.template_filter('format_date')
@@ -632,8 +693,18 @@ def fetch_price_from_api(identifier):
 
                 if price not in [None, 'N/A', 'NA', '']:
                     price = float(price)
-                    prev_close = float(prev_close) if prev_close not in [None, 'N/A', 'NA', ''] else price
+                    prev_ok = prev_close not in [None, 'N/A', 'NA', ''] and float(prev_close) > 0
+                    prev_close = float(prev_close) if prev_ok else price
                     currency = detect_currency_from_symbol(symbol)
+                    # Symbole sans place (NVDA, TSLA...) ou veille absente/identique : vérifier chez Yahoo
+                    if '.' not in symbol or not prev_ok or prev_close == price:
+                        meta = yahoo_quote_meta(symbol) or {}
+                        y_currency = (meta.get('currency') or '').strip()
+                        if '.' not in symbol and y_currency.upper() in EXCHANGE_RATES:
+                            currency = y_currency.upper()
+                        y_prev = meta.get('chartPreviousClose')
+                        if y_prev and (not prev_ok or prev_close == price) and y_currency != 'GBp':
+                            prev_close = float(y_prev)
 
                     # Conversion pence -> livres pour titres UK
                     if currency == 'GBP' and price > 10:
@@ -657,7 +728,7 @@ def fetch_price_from_api(identifier):
             if result:
                 meta = result[0].get('meta', {})
                 price = meta.get('regularMarketPrice')
-                prev_close = meta.get('previousClose')
+                prev_close = meta.get('previousClose') or meta.get('chartPreviousClose')
                 yahoo_currency = (meta.get('currency') or '').strip().upper()
                 # Devise réelle Yahoo (MXN, USD…) ; sinon heuristique symbole (évite d'afficher des MXN comme des EUR)
                 currency = yahoo_currency if yahoo_currency else detect_currency_from_symbol(symbol)
@@ -959,6 +1030,7 @@ def dashboard():
 
         # Pour trouver les top/bottom performers du jour
         day_performances = []
+        day_pv_map = {}
         
         for a in actifs:
             p_actuel = safe_float(a['prix_actuel'])
@@ -980,13 +1052,8 @@ def dashboard():
             pv = val_actuelle - val_achat
             
             # PV du jour : détecter si prix_veille est aberrant
-            # Si prix_veille est trop éloigné du prix actuel (> 20% d'écart), utiliser prix_achat
-            if p_veille == 0 or abs(p_veille - p_actuel) > (p_actuel * 0.20):
-                # Prix de veille aberrant : calculer par rapport au prix d'achat
-                day_pv = val_actuelle - val_achat
-            else:
-                # Prix de veille normal : calculer la variation du jour
-                day_pv = val_actuelle - val_veille
+            day_pv = calc_day_pv(p_actuel, p_veille, p_achat, qty, a['date_achat'] or '')
+            day_pv_map[a['id']] = day_pv
             
             # Convertir vers EUR pour les totaux (devise de référence)
             val_actuelle_eur = convert_currency(val_actuelle, devise_cotation, 'EUR')
@@ -994,19 +1061,8 @@ def dashboard():
             pv_eur = convert_currency(pv, devise_cotation, 'EUR')
             day_pv_eur = convert_currency(day_pv, devise_cotation, 'EUR')
             
-            # Récupérer le cumul du mois depuis la table dédiée
-            # IMPORTANT : Afficher SEULEMENT le cumul (PAS la PV du jour en cours)
-            # Le cumul sera mis à jour à 17h45 par le CRON
-            cumul_mois_row = conn.execute(
-                'SELECT cumul_pv FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-                (a['id'], mois_actuel)
-            ).fetchone()
-            
-            if cumul_mois_row:
-                month_pv_eur = safe_float(cumul_mois_row['cumul_pv'])
-            else:
-                # Pas encore de cumul pour ce mois : afficher 0
-                month_pv_eur = 0
+            # PV du mois calculée en direct (le cumul est enregistré lors des mises à jour de prix)
+            month_pv_eur = calc_month_pv_eur(conn, a, mois_actuel)
             
             # Calcul de la variation journalière en %
             if p_veille > 0:
@@ -1043,7 +1099,7 @@ def dashboard():
                               total_achat=total_achat, total_actuel=total_actuel,
                               total_day_pv=total_day_pv, total_month_pv=total_month_pv,
                               derniere_maj=derniere_maj,
-                              comptes_stats=comptes_stats,
+                              comptes_stats=comptes_stats, day_pv_map=day_pv_map,
                               top_gainers=top_gainers, top_losers=top_losers,
                               user_devise=user_devise, currency_symbol=currency_symbol,
                               auto_refresh_launched=auto_refresh_launched,
@@ -1124,10 +1180,7 @@ def export_portefeuille():
 
         val_actuelle = (p_actuel * qty) + frais
         val_achat = (p_achat * qty) + frais
-        if p_veille == 0 or abs(p_veille - p_actuel) > (p_actuel * 0.20):
-            day_pv = val_actuelle - val_achat
-        else:
-            day_pv = val_actuelle - ((p_veille * qty) + frais)
+        day_pv = calc_day_pv(p_actuel, p_veille, p_achat, qty, a['date_achat'] or '')
         pv = val_actuelle - val_achat
         pv_pct = ((p_actuel - p_achat) / p_achat * 100) if p_achat > 0 else 0.0
 
@@ -1224,11 +1277,18 @@ def add_actif():
     date_achat = request.form.get('date_achat', '')
     devise_cotation = detect_currency_from_symbol(ticker)
 
+    prix_hist, devise_hist = pnow, devise_cotation
     if ticker and pnow <= 0:
         price, fetched_name, prev_close, currency = fetch_price_from_api(ticker)
         if price is not None:
             pnow = price
-            devise_cotation = currency or devise_cotation
+            prix_hist, devise_hist = price, currency
+            if currency == 'USD':
+                # Prix d'achat saisis en euros : on garde l'actif en EUR et on convertit le cours
+                pnow = round(convert_currency(price, 'USD', 'EUR'), 4)
+                devise_cotation = 'EUR'
+            else:
+                devise_cotation = currency or devise_cotation
             if not nom:
                 nom = fetched_name or ticker
     
@@ -1242,7 +1302,7 @@ def add_actif():
     date_actuelle = datetime.now().strftime("%Y-%m-%d")
     mois_actuel = datetime.now().strftime("%Y-%m")
     conn.execute('INSERT INTO historique_prix (actif_id, date, prix, devise) VALUES (?, ?, ?, ?)',
-                (actif_id, date_actuelle, pnow, devise_cotation))
+                (actif_id, date_actuelle, prix_hist, devise_hist))
     
     # Initialiser le cumul du mois à 0 pour ce nouvel actif
     conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, 0, ?)',
@@ -3757,6 +3817,7 @@ def _run_prices_update(user_id, is_cron, cumul_actif):
         mois_actuel = datetime.now().strftime("%Y-%m")
         heure_actuelle = datetime.now().strftime("%d/%m %H:%M")
 
+        refresh_exchange_rates()
         print(f"DEBUG: Debut mise a jour pour {len(actifs_db)} titres (user={user_id}, cron={is_cron})")
         for row in actifs_db:
             actif_info = conn.execute(
@@ -3776,26 +3837,22 @@ def _run_prices_update(user_id, is_cron, cumul_actif):
                 else:
                     nouveau_prix_veille = float(p)
 
-                pv_jour = (float(p) - nouveau_prix_veille) * quantite
-                pv_jour_eur = convert_currency(pv_jour, currency, 'EUR')
-
-                if cumul_actif:
-                    cumul_existant = conn.execute(
-                        'SELECT id, cumul_pv, derniere_mise_a_jour FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?',
-                        (row['id'], mois_actuel)
-                    ).fetchone()
-                    if cumul_existant:
-                        derniere_maj = cumul_existant['derniere_mise_a_jour']
-                        if derniere_maj != date_actuelle:
-                            nouveau_cumul = cumul_existant['cumul_pv'] + pv_jour_eur
-                            conn.execute('UPDATE cumul_pv_mois SET cumul_pv = ?, derniere_mise_a_jour = ? WHERE id = ?',
-                                       (nouveau_cumul, date_actuelle, cumul_existant['id']))
-                    else:
-                        conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
-                                   (row['id'], mois_actuel, pv_jour_eur, date_actuelle))
+                # Le prix d'achat est dans la devise de l'actif : on y ramène le cours
+                # au lieu de changer la devise (sinon des euros seraient lus comme des dollars).
+                devise_actif = actif_info['devise_cotation'] or currency
+                prix_brut, devise_brute = float(p), currency
+                p = convert_currency(float(p), currency, devise_actif)
+                if pv and float(pv) > 0:
+                    nouveau_prix_veille = convert_currency(nouveau_prix_veille, currency, devise_actif)
+                elif not ancien_prix > 0:
+                    nouveau_prix_veille = p
+                if devise_brute != devise_actif and devise_brute == 'USD':
+                    # Historique enregistré en dollars mais étiqueté EUR : corriger l'étiquette seulement
+                    conn.execute("UPDATE historique_prix SET devise = 'USD' WHERE actif_id = ? AND devise = ?",
+                                 (row['id'], devise_actif))
 
                 conn.execute('UPDATE actifs SET prix_actuel = ?, prix_veille = ?, devise_cotation = ? WHERE id = ?',
-                           (float(p), nouveau_prix_veille, currency, row['id']))
+                           (round(float(p), 4), round(nouveau_prix_veille, 4), devise_actif, row['id']))
 
                 existing = conn.execute(
                     'SELECT id FROM historique_prix WHERE actif_id = ? AND date = ?',
@@ -3803,10 +3860,18 @@ def _run_prices_update(user_id, is_cron, cumul_actif):
                 ).fetchone()
                 if existing:
                     conn.execute('UPDATE historique_prix SET prix = ?, devise = ? WHERE id = ?',
-                               (float(p), currency, existing['id']))
+                               (prix_brut, devise_brute, existing['id']))
                 else:
                     conn.execute('INSERT INTO historique_prix (actif_id, date, prix, devise) VALUES (?, ?, ?, ?)',
-                               (row['id'], date_actuelle, float(p), currency))
+                               (row['id'], date_actuelle, prix_brut, devise_brute))
+
+                maj = conn.execute('SELECT * FROM actifs WHERE id = ?', (row['id'],)).fetchone()
+                pv_mois = round(calc_month_pv_eur(conn, maj, mois_actuel), 4)
+                conn.execute('DELETE FROM cumul_pv_mois WHERE actif_id = ? AND mois = ?', (row['id'], mois_actuel))
+                conn.execute('INSERT INTO cumul_pv_mois (actif_id, mois, cumul_pv, derniere_mise_a_jour) VALUES (?, ?, ?, ?)',
+                             (row['id'], mois_actuel, pv_mois, date_actuelle))
+                # Libérer la base entre deux titres (appels réseau)
+                conn.commit()
 
                 updated += 1
                 print(f"DEBUG: Mis a jour {row['ticker']} -> {p} {currency}")
