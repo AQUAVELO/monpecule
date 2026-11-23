@@ -696,15 +696,16 @@ def fetch_price_from_api(identifier):
                     prev_ok = prev_close not in [None, 'N/A', 'NA', ''] and float(prev_close) > 0
                     prev_close = float(prev_close) if prev_ok else price
                     currency = detect_currency_from_symbol(symbol)
-                    # Symbole sans place (NVDA, TSLA...) ou veille absente/identique : vérifier chez Yahoo
-                    if '.' not in symbol or not prev_ok or prev_close == price:
-                        meta = yahoo_quote_meta(symbol) or {}
-                        y_currency = (meta.get('currency') or '').strip()
-                        if '.' not in symbol and y_currency.upper() in EXCHANGE_RATES:
-                            currency = y_currency.upper()
-                        y_prev = meta.get('chartPreviousClose')
-                        if y_prev and (not prev_ok or prev_close == price) and y_currency != 'GBp':
-                            prev_close = float(y_prev)
+                    # EODHD remplace la clôture de la veille par un cours du jour après la fermeture :
+                    # on prend celle de Yahoo (même symbole), EODHD ne sert que de secours.
+                    meta = yahoo_quote_meta(symbol) or {}
+                    y_currency = (meta.get('currency') or '').strip()
+                    if '.' not in symbol and y_currency.upper() in EXCHANGE_RATES:
+                        currency = y_currency.upper()
+                    y_prev = meta.get('chartPreviousClose')
+                    meme_devise = y_currency == currency or (y_currency == 'GBp' and currency == 'GBP')
+                    if y_prev and meme_devise:
+                        prev_close = float(y_prev)
 
                     # Conversion pence -> livres pour titres UK
                     if currency == 'GBP' and price > 10:
