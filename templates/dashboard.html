@@ -259,7 +259,7 @@
                     {% set val_actuelle = (actif.prix_actuel * actif.quantite) + actif.frais %}
                     {% set val_achat = (actif.prix_achat * actif.quantite) + actif.frais %}
                     {% set pv = val_actuelle - val_achat %}
-                    {% set day_pv = (actif.prix_actuel - actif.prix_veille) * actif.quantite %}
+                    {% set day_pv = day_pv_map.get(actif.id, 0) %}
                     
                     <div class="actif-item" style="transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" onmouseout="this.style.transform=''; this.style.boxShadow='';">
                         <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 5px;">
